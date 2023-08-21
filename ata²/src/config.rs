@@ -15,7 +15,6 @@
 ///  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 ///  See the License for the specific language governing permissions and
 ///  limitations under the License.
-
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fmt::{self, Display};
@@ -32,7 +31,8 @@ use serde::{Deserialize, Serialize};
 use toml::de::Error as TomlError;
 
 lazy_static! {
-    static ref DEFAULT_CONFIG_FILENAME: PathBuf = "ata.toml".into();
+    pub(crate) static ref DEFAULT_CONFIG_FILENAME: PathBuf = "ata2.toml".into();
+    pub(crate) static ref DEFAULT_CONFIG_FILENAME_V1: PathBuf = "ata.toml".into();
 }
 
 /// UI config
@@ -42,7 +42,8 @@ lazy_static! {
 pub struct UiConfig {
     /// Require user to press ^C twice?
     pub double_ctrlc: bool,
-    pub hide_config: bool
+    /// Hide config on run?
+    pub hide_config: bool,
 }
 
 /// For definitions, see https://platform.openai.com/docs/api-reference/completions/create
@@ -65,7 +66,7 @@ pub struct Config {
     pub frequency_penalty: f64,
     pub best_of: u64,
     pub logit_bias: HashMap<String, f64>,
-    pub ui: UiConfig
+    pub ui: UiConfig,
 }
 
 impl Config {
@@ -153,7 +154,7 @@ impl Default for Config {
             best_of: 1,
             logit_bias: HashMap::new(),
             api_key: String::default(),
-            ui: UiConfig::default()
+            ui: UiConfig::default(),
         }
     }
 }
@@ -162,7 +163,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             double_ctrlc: true,
-            hide_config: false
+            hide_config: false,
         }
     }
 }
@@ -200,19 +201,31 @@ where
     }
 }
 
-fn get_config_dir() -> PathBuf {
+fn get_config_dir<const V: usize>() -> PathBuf {
     ProjectDirs::from(
-        "ata",
+        if V == 1 {
+            "ata"
+        } else if V == 2 {
+            "ata2"
+        } else {
+            unreachable!()
+        },
         "Ask the Terminal Anything (ATA) Project Authors",
-        "ata",
+        if V == 1 {
+            "ata"
+        } else if V == 2 {
+            "ata2"
+        } else {
+            unreachable!()
+        },
     )
     .unwrap()
     .config_dir()
     .into()
 }
 
-pub fn default_path(name: Option<&Path>) -> PathBuf {
-    let mut config_file = get_config_dir().to_path_buf();
+pub fn default_path<const V: usize>(name: Option<&Path>) -> PathBuf {
+    let mut config_file = get_config_dir::<V>().to_path_buf();
     let file: Vec<_> = if let Some(name) = name {
         let mut name = name.to_path_buf();
         name.set_extension("toml");
@@ -234,7 +247,7 @@ impl ConfigLocation {
     pub fn location(&self) -> PathBuf {
         match self {
             ConfigLocation::Auto => {
-                let config_dir = get_config_dir().to_path_buf();
+                let config_dir = get_config_dir::<2>().to_path_buf();
                 if DEFAULT_CONFIG_FILENAME.exists() {
                     warn!(
                         "{} found in working directory BUT UNSPECIFIED. \
@@ -245,11 +258,15 @@ impl ConfigLocation {
                     );
                     return DEFAULT_CONFIG_FILENAME.clone();
                 }
-                default_path(None)
+                default_path::<2>(None)
             }
             ConfigLocation::Path(pb) => pb.clone(),
-            ConfigLocation::Named(name) => default_path(Some(name)),
+            ConfigLocation::Named(name) => default_path::<2>(Some(name)),
         }
+    }
+
+    pub fn location_v1(&self) -> PathBuf {
+        default_path::<1>(Some(&Path::new("ata.toml")))
     }
 }
 
@@ -280,7 +297,7 @@ impl Display for Config {
             let value: &dyn Reflect = value;
             let key = self.name_at(i).unwrap();
             if key == "api_key" {
-                continue
+                continue;
             }
             ok = writeln!(f, "{key}: {:#?}", value);
         }

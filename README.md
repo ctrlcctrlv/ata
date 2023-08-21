@@ -27,19 +27,19 @@ TIP:<br>
 
 ## Usage
 
-Download the binary for your system from [Releases](https://github.com/rikhuijzer/ata/releases).
-If you're running Arch Linux, then you can use the AUR packages: [ata](https://aur.archlinux.org/packages/ata), [ata-git](https://aur.archlinux.org/packages/ata-git), or [ata-bin](https://aur.archlinux.org/packages/ata-bin).
+Download the binary for your system from [Releases](https://github.com/ctrlcctrlv/ata2/releases).
+~~If you're running Arch Linux, then you can use the AUR packages: [ata](https://aur.archlinux.org/packages/ata), [ata-git](https://aur.archlinux.org/packages/ata-git), or [ata-bin](https://aur.archlinux.org/packages/ata-bin).~~ (Note: not yet done in fork.)
 
 To specify the API key and some basic model settings, start the application.
-It should give an error and the option to create a configuration file called `ata.toml` for you.
-Press `y` and `ENTER` to create a `ata.toml` file.
+It should give an error and the option to create a configuration file called `ata2.toml` for you.
+Press `y` and `ENTER` to create a `ata2.toml` file.
 
 Next, request an API key via <https://beta.openai.com/account/api-keys> and update the key in the example configuration file.
 
 For more information, see:
 
 ```sh
-$ ata --help
+$ ata2 --help
 ```
 
 ## FAQ
@@ -64,11 +64,11 @@ Make sure that you have `Cargo` installed and then run:
 ```sh
 $ git clone https://github.com/ctrlcctrlv/ata2.git
 
-$ cd ata/
+$ cd ata2/
 
 $ cargo build --release
 ```
-After this, your binary should be available at `target/release/ata` (Unix-based) or `target/release/ata.exe` (Windows).
+After this, your binary should be available at `target/release/ata2` (Unix-based) or `target/release/ata2.exe` (Windows).
 
 You may also:
 

@@ -35,6 +35,7 @@ use rustyline::Editor;
 use std::fs::File;
 use std::io::Read;
 
+use std::fs;
 use std::result::Result;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -49,7 +50,6 @@ use crate::args::Ata;
 use crate::config::Config;
 use crate::prompt::print_error;
 
-
 fn main() -> prompt::TokioResult<()> {
     init_logger();
     let flags: Ata = Ata::parse();
@@ -59,7 +59,24 @@ fn main() -> prompt::TokioResult<()> {
     }
     let filename = flags.config.location();
     if !filename.exists() {
-        help::missing_toml();
+        let v1_filename = flags.config.location_v1();
+        if v1_filename.exists() {
+            fs::create_dir_all(&config::default_path::<2>(None).parent().unwrap())
+                .expect("Could not make configuration directory");
+            fs::copy(&v1_filename, &filename).expect(&format!(
+                "Failed to copy {} to {}",
+                v1_filename.to_string_lossy(),
+                filename.to_string_lossy()
+            ));
+            warn!(
+                "{}", &format!(
+                    "Copied old configuration file to ata¹'s location {}",
+                    filename.to_string_lossy()
+                ),
+            );
+        } else {
+            help::missing_toml();
+        }
     }
     let mut contents = String::new();
     File::open(filename)
@@ -148,7 +165,8 @@ fn main() -> prompt::TokioResult<()> {
                 if is_running_clone.load(Ordering::SeqCst) {
                     abort.store(true, Ordering::SeqCst);
                 } else {
-                    if config_clone.ui.double_ctrlc && !had_first_interrupt.load(Ordering::Relaxed) {
+                    if config_clone.ui.double_ctrlc && !had_first_interrupt.load(Ordering::Relaxed)
+                    {
                         had_first_interrupt.store(true, Ordering::Relaxed);
                         println!("\nPress Ctrl-C again to exit.");
                         thread::sleep(Duration::from_millis(100));

@@ -15,10 +15,10 @@
 ///  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 ///  See the License for the specific language governing permissions and
 ///  limitations under the License.
-
 use rustyline::Editor;
 
 use crate::config;
+use config::DEFAULT_CONFIG_FILENAME;
 use std::fs::{self, File};
 use std::io::Write as _;
 
@@ -59,10 +59,10 @@ max_tokens = 2048
 temperature = 0.8"#;
 
 pub fn missing_toml() {
-    let default_path = config::default_path(None);
+    let default_path = config::default_path::<1>(None);
     eprintln!(
         r#"
-Could not find the file `ata.toml`. To fix this, create {0}.
+Could not find the file `{1}`. To fix this, create {0}.
 
 For example, use the following content (the text between the ```):
 
@@ -81,7 +81,8 @@ The `temperature` sets the `sampling temperature`. From the OpenAI API docs: "Wh
 [1]: https://writings.stephenwolfram.com/2023/02/what-is-chatgpt-doing-and-why-does-it-work/
 
     "#,
-        (&default_path).display()
+        (&default_path).display(),
+        DEFAULT_CONFIG_FILENAME.to_string_lossy()
     );
     let mut rl = Editor::<()>::new().unwrap();
     eprintln!(
