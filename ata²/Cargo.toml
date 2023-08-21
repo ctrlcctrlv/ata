@@ -1,9 +1,9 @@
 [package]
-name = "ata"
-version = "2.0.2"
+name = "ata2"
+version = "1.0.0"
 edition = "2021"
-authors = ["Rik Huijzer <t.h.huijzer@rug.nl>", "Fredrick R. Brennan <copypaste@kittens.ph>", "ATA Project Authors"]
-license = "MIT"
+authors = ["Fredrick R. Brennan <copypaste@kittens.ph>", "Rik Huijzer <t.h.huijzer@rug.nl>", "ATA Project Authors"]
+license = "Apache-2.0"
 
 [dependencies]
 rustyline = "10.1"

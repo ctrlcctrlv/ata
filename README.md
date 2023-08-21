@@ -1,4 +1,4 @@
-<h1 align="center"><code>ata</code>: Ask the Terminal Anything</h1>
+<h1 align="center"><code>ata²</code>: Ask the Terminal Anything</h1>
 
 <h3 align="center">ChatGPT in the terminal</h3>
 
@@ -6,10 +6,16 @@
   <a href="https://asciinema.org/a/565384"><img src="https://asciinema.org/a/565384.svg" alt="asciicast"></a>
 </p>
 
+## This is a fork!
+
+The original project, `ata`, by Rik Huijzer is [elsewhere](https://github.com/rikhuijzer/ata).
+
+This fork implements many new config options and features.
+
 <h3 align=center>
 TIP:<br>
   Run a terminal with this tool in your background and show/hide it with a keypress.<br>
-    This can be done via: Iterm2 (Mac), Guake (Ubuntu), scratchpad (i3/sway), or the quake mode for the Windows Terminal.
+    This can be done via: Iterm2 (Mac), Guake (Ubuntu), scratchpad (i3/sway), yakuake (KDE), or the quake mode for the Windows Terminal.
 </h3>
 
 ## Productivity benefits
@@ -56,10 +62,33 @@ Yes, you can clone the repository and build the project via [`Cargo`](https://gi
 Make sure that you have `Cargo` installed and then run:
 
 ```sh
-$ git clone https://github.com/rikhuijzer/ata.git
+$ git clone https://github.com/ctrlcctrlv/ata2.git
 
 $ cd ata/
 
 $ cargo build --release
 ```
 After this, your binary should be available at `target/release/ata` (Unix-based) or `target/release/ata.exe` (Windows).
+
+You may also:
+
+```sh
+$ cargo install --path .
+```
+
+# License
+
+   Copyright 2023 Fredrick R. Brennan &lt;copypaste@kittens.ph&gt;, Rik Huijzer &lt;rikhuijzer@pm.me&gt;, &amp; ATA Project Authors
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+

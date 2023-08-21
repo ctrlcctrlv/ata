@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "ata"
+    "ata²"
 ]
 resolver = "2"
 
-[profile.release.package.ata]
+[profile.release.package.ata2]
 strip = true
