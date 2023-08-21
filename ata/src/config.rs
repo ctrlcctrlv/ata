@@ -17,7 +17,16 @@ lazy_static! {
     static ref DEFAULT_CONFIG_FILENAME: PathBuf = "ata.toml".into();
 }
 
-// For definitions, see https://platform.openai.com/docs/api-reference/completions/create
+/// UI config
+#[repr(C)]
+#[derive(Clone, Deserialize, Debug, Serialize, Reflect)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Require user to press ^C twice?
+    pub double_ctrlc: bool
+}
+
+/// For definitions, see https://platform.openai.com/docs/api-reference/completions/create
 #[repr(C)]
 #[derive(Clone, Deserialize, Debug, Serialize, Reflect)]
 #[serde(default)]
@@ -37,6 +46,7 @@ pub struct Config {
     pub frequency_penalty: f64,
     pub best_of: u64,
     pub logit_bias: HashMap<String, f64>,
+    pub ui: UiConfig
 }
 
 impl Config {
@@ -124,6 +134,15 @@ impl Default for Config {
             best_of: 1,
             logit_bias: HashMap::new(),
             api_key: String::default(),
+            ui: UiConfig::default()
+        }
+    }
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            double_ctrlc: true
         }
     }
 }

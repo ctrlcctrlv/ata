@@ -31,7 +31,6 @@ use crate::args::Ata;
 use crate::config::Config;
 use crate::prompt::print_error;
 
-static HAD_FIRST_INTERRUPT: AtomicBool = AtomicBool::new(false);
 
 fn main() -> prompt::TokioResult<()> {
     init_logger();
@@ -50,7 +49,9 @@ fn main() -> prompt::TokioResult<()> {
         .read_to_string(&mut contents)
         .unwrap();
 
-    let config = Config::from(contents);
+    let config = Arc::new(Config::from(&contents));
+    let config_clone = config.clone();
+    let had_first_interrupt: AtomicBool = AtomicBool::new(false);
     config.validate().unwrap_or_else(|e| {
         error!("Config error!: {e}. Dying.");
         panic!()
@@ -123,14 +124,14 @@ fn main() -> prompt::TokioResult<()> {
                 }
                 rl.add_history_entry(line.as_str());
                 tx.send(line).unwrap();
-                HAD_FIRST_INTERRUPT.store(false, Ordering::Relaxed);
+                had_first_interrupt.store(false, Ordering::Relaxed);
             }
             Err(ReadlineError::Interrupted) => {
                 if is_running_clone.load(Ordering::SeqCst) {
                     abort.store(true, Ordering::SeqCst);
                 } else {
-                    if !HAD_FIRST_INTERRUPT.load(Ordering::Relaxed) {
-                        HAD_FIRST_INTERRUPT.store(true, Ordering::Relaxed);
+                    if config_clone.ui.double_ctrlc && !had_first_interrupt.load(Ordering::Relaxed) {
+                        had_first_interrupt.store(true, Ordering::Relaxed);
                         println!("\nPress Ctrl-C again to exit.");
                         thread::sleep(Duration::from_millis(100));
                         println!();
