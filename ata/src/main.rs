@@ -59,7 +59,7 @@ fn main() -> prompt::TokioResult<()> {
 
     println!("Ask the Terminal Anything");
 
-    if !flags.hide_config {
+    if !flags.hide_config && !config.ui.hide_config {
         println!("{config}");
     }
 

@@ -23,7 +23,8 @@ lazy_static! {
 #[serde(default)]
 pub struct UiConfig {
     /// Require user to press ^C twice?
-    pub double_ctrlc: bool
+    pub double_ctrlc: bool,
+    pub hide_config: bool
 }
 
 /// For definitions, see https://platform.openai.com/docs/api-reference/completions/create
@@ -142,7 +143,8 @@ impl Default for Config {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            double_ctrlc: true
+            double_ctrlc: true,
+            hide_config: false
         }
     }
 }
