@@ -22,7 +22,8 @@ use std::fmt::{self, Display};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use bevy_reflect::{Reflect, Struct as _};
+use ansi_colors::ColouredStr;
+use bevy_reflect::{Reflect, Struct};
 use bevy_utils::HashMap;
 use directories::ProjectDirs;
 use os_str_bytes::OsStrBytes as _;
@@ -44,6 +45,10 @@ pub struct UiConfig {
     pub double_ctrlc: bool,
     /// Hide config on run?
     pub hide_config: bool,
+    /// Redact API key?
+    pub redact_api_key: bool,
+    /// Allow multiline insertions? If so, you end the input by sending an EOF (^D).
+    pub multiline_insertions: bool,
 }
 
 /// For definitions, see https://platform.openai.com/docs/api-reference/completions/create
@@ -66,6 +71,7 @@ pub struct Config {
     pub frequency_penalty: f64,
     pub best_of: u64,
     pub logit_bias: HashMap<String, f64>,
+    pub history_file: PathBuf,
     pub ui: UiConfig,
 }
 
@@ -132,6 +138,20 @@ impl Config {
             }
         }
 
+        let history_dir = match self.history_file.parent() {
+            Some(dir) => dir,
+            None => return Err(String::from("History file has no parent")),
+        };
+
+        let history_metadata = match history_dir.metadata() {
+            Ok(metadata) => metadata,
+            Err(e) => return Err(format!("History file metadata error: {}", e)),
+        };
+
+        if history_metadata.permissions().readonly() {
+            return Err(String::from("History file dir is read-only"));
+        }
+
         Ok(())
     }
 }
@@ -140,6 +160,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             model: "text-davinci-003".into(),
+            history_file: PathBuf::from(get_config_dir::<2>().join("history")),
             max_tokens: 16,
             temperature: 0.5,
             suffix: None,
@@ -164,7 +185,29 @@ impl Default for UiConfig {
         Self {
             double_ctrlc: true,
             hide_config: false,
+            redact_api_key: true,
+            multiline_insertions: false,
         }
+    }
+}
+
+fn fmt_reflectable(f: &mut fmt::Formatter<'_>, value: &dyn Struct) -> Result<(), fmt::Error> {
+    write!(f, "{{")?;
+    let num_fields = value.iter_fields().count();
+    for (i, v) in value.iter_fields().enumerate() {
+        let key = value.name_at(i).unwrap();
+        if i == num_fields - 1 {
+            write!(f, "{}: {:?}", key, v)?;
+        } else {
+            write!(f, "{}: {:?}, ", key, v)?;
+        }
+    }
+    write!(f, "}}")
+}
+
+impl Display for UiConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        fmt_reflectable(f, self)
     }
 }
 
@@ -289,17 +332,36 @@ where
 
 impl Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        let mut ok = Ok(());
+        let mut header = ColouredStr::new("Configuration:");
+        header.underline();
+        let mut ok = writeln!(f, "{}", header);
         for (i, value) in self.iter_fields().enumerate() {
             if !ok.is_ok() {
                 break;
             }
-            let value: &dyn Reflect = value;
             let key = self.name_at(i).unwrap();
-            if key == "api_key" {
-                continue;
+            let mut value2 = match value.downcast_ref::<UiConfig>() {
+                Some(ui) => Some(ui.to_string()),
+                // Doing this eliminates quotes around strings
+                None => match value.downcast_ref::<String>() {
+                    Some(s) => match key {
+                        "model" => Some(s.to_uppercase()),
+                        _ => Some(s.to_string()),
+                    },
+                    None => None,
+                },
+            };
+            if self.ui.redact_api_key && key == "api_key" {
+                let mut redacted = ColouredStr::new("[redacted]");
+                redacted.red();
+                value2 = Some(redacted.to_string());
             }
-            ok = writeln!(f, "{key}: {:#?}", value);
+
+            if let Some(v) = value2 {
+                ok = writeln!(f, "{key}: {value}", key = key, value = v);
+            } else {
+                ok = writeln!(f, "{key}: {value:#?}", key = key, value = value);
+            }
         }
         ok
     }

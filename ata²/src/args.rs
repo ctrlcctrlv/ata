@@ -15,13 +15,19 @@
 ///  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 ///  See the License for the specific language governing permissions and
 ///  limitations under the License.
+///
+/// Ask the Terminal Anything (ATA): OpenAI GPT in the terminal
 use crate::config::ConfigLocation;
 
 use clap::Parser;
 
-/// Ask the Terminal Anything (ATA): OpenAI GPT in the terminal
+use once_cell::sync::Lazy;
+
+#[allow(non_upper_case_globals)]
+static AUTHORS: Lazy<&'static str> = Lazy::new(|| crate_authors!("\n\t"));
+
 #[derive(Parser, Debug)]
-#[command(author = crate_authors!("\n\t"), version = crate_version!(),
+#[command(author = &*AUTHORS, version = crate_version!(),
     about, long_about = None,
     help_template = "{before-help}{name} {version} — {about}\
     \n\n\
@@ -30,7 +36,7 @@ use clap::Parser;
     {usage-heading} {usage}\
     \n\n\
     {all-args}{after-help}")]
-pub struct Ata {
+pub struct Ata2 {
     /// Path to the configuration TOML file.
     #[arg(short = 'c', long = "config", default_value = "")]
     pub config: ConfigLocation,

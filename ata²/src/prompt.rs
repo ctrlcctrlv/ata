@@ -1,3 +1,4 @@
+use ansi_colors::ColouredStr;
 ///	# ata²
 ///
 ///	 © 2023    Fredrick R. Brennan <copypaste@kittens.ph>
@@ -15,14 +16,17 @@
 ///  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 ///  See the License for the specific language governing permissions and
 ///  limitations under the License.
+use atty;
 use hyper::body::HttpBody;
 use hyper::Body;
 use hyper::Client;
 use hyper::Method;
 use hyper::Request;
 use hyper_rustls::HttpsConnectorBuilder;
+use log::debug;
 use serde_json::json;
 use serde_json::Value;
+
 use std::error::Error;
 use std::io::Write;
 use std::result::Result;
@@ -42,21 +46,37 @@ fn print_and_flush(text: &str) {
     std::io::stdout().flush().unwrap();
 }
 
-pub fn print_bold(msg: &str) {
-    println!("\x1b[1m{msg}\x1b[0m");
+fn eprint_and_flush(text: &str) {
+    eprint!("{text}");
+    std::io::stderr().flush().unwrap();
+}
+
+pub fn eprint_bold(msg: &str) {
+    if atty::is(atty::Stream::Stderr) {
+        let mut bold = ColouredStr::new(msg);
+        bold.bold();
+        let bold = bold.to_string();
+        eprint_and_flush(&bold.as_str());
+    } else {
+        eprint_and_flush(msg);
+    }
 }
 
 pub fn print_prompt() {
-    print_bold("Prompt: ");
+    if atty::is(atty::Stream::Stderr) {
+        eprint_bold("Prompt:\n");
+    }
 }
 
-fn print_response() {
-    print_bold("Response: ");
+fn print_response_prompt() {
+    if atty::is(atty::Stream::Stderr) {
+        eprint_bold("Response:\n");
+    }
 }
 
 fn finish_prompt(is_running: Arc<AtomicBool>) {
     is_running.store(false, Ordering::SeqCst);
-    print_and_flush("\n\n");
+    eprint_and_flush("\n\n");
     print_prompt();
 }
 
@@ -107,7 +127,7 @@ fn should_retry(line: &str, count: i64) -> bool {
         let error_type = value2unquoted_text(&v["error"]["type"]);
         let max_tries = 3;
         if count < max_tries && error_type == "server_error" {
-            println!(
+            eprintln!(
                 "\
                 Server responded with a `server_error`. \
                 Trying again... ({count}/{max_tries})\
@@ -142,7 +162,7 @@ pub async fn request(
         "messages": [
             {
                 "role": "user",
-                "content": format!("{sanitized_input}\\n\\n")
+                "content": sanitized_input
             }
         ],
         "max_tokens": max_tokens,
@@ -158,6 +178,19 @@ pub async fn request(
         .header("Authorization", bearer)
         .body(Body::from(body))?;
 
+    let (mut req_parts, req_body) = req.into_parts();
+    {
+        req_parts
+            .headers
+            .get_mut("Authorization")
+            .unwrap()
+            .set_sensitive(true);
+    }
+    let req_body = &*(hyper::body::to_bytes(req_body).await?);
+    let dbg_req_headers = format!("{:#?}", req_parts);
+    let dbg_req_body = std::str::from_utf8(req_body).unwrap();
+    let req = Request::from_parts(req_parts, Body::from(req_body.to_vec()));
+
     let https = HttpsConnectorBuilder::new()
         .with_native_roots()
         .https_only()
@@ -169,14 +202,19 @@ pub async fn request(
     let mut response = match client.request(req).await {
         Ok(response) => response,
         Err(e) => {
-            print_and_flush("\n");
+            eprint_and_flush("\n");
             print_error(is_running, &e.to_string());
             return Ok(false);
         }
     };
 
+    debug!(
+        "Request:\n\nHeaders &c.:\n{}\n\nBody:\n{}",
+        dbg_req_headers, dbg_req_body
+    );
+
     // Do not move this in front of the request for UX reasons.
-    print_and_flush("\n");
+    eprint_and_flush("\n");
 
     let mut had_first_success = false;
     let mut data_buffer = vec![];
@@ -209,7 +247,7 @@ pub async fn request(
                     let processed = post_process(&mut print_buffer, &text);
                     if !had_first_success {
                         had_first_success = true;
-                        print_response();
+                        print_response_prompt();
                     };
                     print_and_flush(&processed);
                 } else if v.get("error").is_some() {
