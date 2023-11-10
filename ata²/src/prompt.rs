@@ -17,16 +17,18 @@
 //!  limitations under the License.
 
 use ansi_colors::ColouredStr;
+use async_openai::{
+    config::OpenAIConfig,
+    types::{
+        ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStreamMessage,
+        CreateChatCompletionRequestArgs, FinishReason,
+    },
+    Client,
+};
 use atty;
-use hyper::body::HttpBody;
-use hyper::Body;
-use hyper::Client;
-use hyper::Method;
-use hyper::Request;
-use hyper_rustls::HttpsConnectorBuilder;
 use log::debug;
-use serde_json::json;
-use serde_json::Value;
+
+use futures_util::StreamExt as _;
 
 use std::error::Error;
 use std::io::Write;
@@ -36,11 +38,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 pub type TokioResult<T, E = Box<dyn Error + Send + Sync>> = Result<T, E>;
-
-fn sanitize_input(input: String) -> String {
-    let out = input.trim_end_matches("\n");
-    out.replace('"', "\\\"")
-}
 
 fn print_and_flush(text: &str) {
     print!("{text}");
@@ -115,173 +112,114 @@ fn post_process(print_buffer: &mut Vec<String>, text: &str) -> String {
     fix_newlines(print_buffer, text)
 }
 
-fn value2unquoted_text(value: &serde_json::Value) -> String {
-    value.as_str().unwrap().to_string()
-}
-
-fn should_retry(line: &str, count: i64) -> bool {
-    let v: Value = match serde_json::from_str(line) {
-        Ok(line) => line,
-        Err(_) => return false,
-    };
-    if v.get("error").is_some() {
-        let error_type = value2unquoted_text(&v["error"]["type"]);
-        let max_tries = 3;
-        if count < max_tries && error_type == "server_error" {
-            eprintln!(
-                "\
-                Server responded with a `server_error`. \
-                Trying again... ({count}/{max_tries})\
-                "
-            );
-            return true;
-        }
-    }
-    false
-}
-
-#[tokio::main]
 pub async fn request(
     abort: Arc<AtomicBool>,
     is_running: Arc<AtomicBool>,
     config: &super::Config,
     prompt: String,
-    count: i64,
-) -> TokioResult<bool> {
-    is_running.store(true, Ordering::SeqCst);
-
+    _count: i64,
+) -> TokioResult<Vec<ChatCompletionResponseStreamMessage>> {
     let api_key: String = config.clone().api_key;
     let model: String = config.clone().model;
     let max_tokens: i64 = config.clone().max_tokens;
     let temperature: f64 = config.temperature;
 
-    let sanitized_input = sanitize_input(prompt.clone());
-    let bearer = format!("Bearer {api_key}");
-    // Passing newlines behind the prompt to get a more chat-like experience.
-    let body = json!({
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": sanitized_input
-            }
-        ],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stream": true
-    })
-    .to_string();
+    let mut print_buffer: Vec<String> = Vec::new();
+    let oconfig = OpenAIConfig::new().with_api_key(api_key);
+    let openai = Client::with_config(oconfig);
+    let completions = openai.chat();
+    let mut stream = completions
+        .create_stream(
+            CreateChatCompletionRequestArgs::default()
+                .n(1)
+                .messages(vec![ChatCompletionRequestUserMessageArgs::default()
+                    .content(prompt)
+                    .build()?
+                    .into()])
+                .model(&model)
+                .max_tokens(max_tokens as u16)
+                .temperature(temperature as f32)
+                .stream(true)
+                .build()?,
+        )
+        .await?;
+    is_running.store(true, Ordering::SeqCst);
 
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri("https://api.openai.com/v1/chat/completions")
-        .header("Content-Type", "application/json")
-        .header("Authorization", bearer)
-        .body(Body::from(body))?;
+    let got_first_success: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let mut ret = vec![];
 
-    let (mut req_parts, req_body) = req.into_parts();
-    {
-        req_parts
-            .headers
-            .get_mut("Authorization")
-            .unwrap()
-            .set_sensitive(true);
-    }
-    let req_body = &*(hyper::body::to_bytes(req_body).await?);
-    let dbg_req_headers = format!("{:#?}", req_parts);
-    let dbg_req_body = std::str::from_utf8(req_body).unwrap();
-    let req = Request::from_parts(req_parts, Body::from(req_body.to_vec()));
-
-    let https = HttpsConnectorBuilder::new()
-        .with_native_roots()
-        .https_only()
-        .enable_http1()
-        .build();
-
-    let client = Client::builder().build::<_, hyper::Body>(https);
-
-    let mut response = match client.request(req).await {
-        Ok(response) => response,
-        Err(e) => {
-            eprint_and_flush("\n");
-            print_error(is_running, &e.to_string());
-            return Ok(false);
-        }
-    };
-
-    debug!(
-        "Request:\n\nHeaders &c.:\n{}\n\nBody:\n{}",
-        dbg_req_headers, dbg_req_body
-    );
-
-    // Do not move this in front of the request for UX reasons.
-    eprint_and_flush("\n");
-
-    let mut had_first_success = false;
-    let mut data_buffer = vec![];
-    let mut print_buffer: Vec<String> = vec![];
-    while let Some(chunk) = response.body_mut().data().await {
-        let chunk = chunk?;
-        data_buffer.extend_from_slice(&chunk);
-
-        let events = std::str::from_utf8(&data_buffer)?.split("\n\n");
-        for line in events {
-            if line.starts_with("data:") {
-                let data: &str = &line[6..];
-                if data == "[DONE]" {
-                    finish_prompt(is_running);
-                    return Ok(false);
-                };
-                let v: Value = serde_json::from_str(data)?;
-
-                if v.get("choices").is_some() {
-                    let delta = v.get("choices").unwrap()[0].get("delta");
-                    if delta.is_none() {
-                        // Ignoring wrong responses to avoid crashes.
-                        continue;
-                    }
-                    if delta.unwrap().get("content").is_none() {
-                        // Probably switching "role" (`"role":"assistant"`).
-                        continue;
-                    }
-                    let text = value2unquoted_text(&delta.unwrap()["content"]);
-                    let processed = post_process(&mut print_buffer, &text);
-                    if !had_first_success {
-                        had_first_success = true;
+    'abort: while !abort.load(Ordering::Relaxed) {
+        'outer: while let Some(completion) = stream.next().await {
+            debug!("Completion: {:?}", completion);
+            match completion {
+                Ok(completion) => {
+                    let completion = Arc::new(completion);
+                    ret.push(completion.clone());
+                    if !got_first_success.load(Ordering::SeqCst) {
+                        got_first_success.store(true, Ordering::SeqCst);
                         print_response_prompt();
-                    };
-                    print_and_flush(&processed);
-                } else if v.get("error").is_some() {
-                    let msg = value2unquoted_text(&v["error"]["message"]);
-                    print_error(is_running, &msg);
-                    return Ok(false);
-                } else {
-                    print_error(is_running, data);
-                    return Ok(false);
-                };
-            } else if !line.is_empty() {
-                if !had_first_success {
-                    let retry = should_retry(line, count);
-                    if retry {
-                        return Ok(true);
-                    } else {
-                        print_error(is_running, line);
-                        return Ok(false);
                     }
-                };
-                print_error(is_running, line);
-                return Ok(false);
-            };
-            if abort.load(Ordering::SeqCst) {
-                abort.store(false, Ordering::SeqCst);
-                finish_prompt(is_running);
-                return Ok(false);
-            };
+                    for choice in &completion.choices {
+                        if abort.load(Ordering::Relaxed) {
+                            break 'abort;
+                        }
+                        match choice.finish_reason {
+                            Some(FinishReason::Stop) => {
+                                debug!("Got stop from API, returning to REPL");
+                                break 'abort;
+                            }
+                            Some(reason) => {
+                                let msg = format!("OpenAI API error: {reason:?}");
+                                print_error(is_running.clone(), &msg);
+                                continue 'abort;
+                            }
+                            None => {}
+                        }
+                        match choice.delta.content {
+                            Some(ref text) => {
+                                let newline_fixed = post_process(&mut print_buffer, &text);
+                                print_and_flush(&newline_fixed);
+                            }
+                            None => {
+                                continue 'outer;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("OpenAI API error: {e}");
+                    print_error(is_running.clone(), &msg);
+                    continue 'abort;
+                }
+            }
         }
-        data_buffer.clear();
+        break 'abort;
     }
+
+    if !got_first_success.load(Ordering::SeqCst) {
+        let msg = format!("Empty prompt, aborting.");
+        print_error(is_running.clone(), &msg);
+        return Ok(vec![]);
+    }
+
+    print_and_flush("\n");
+    let result = ret
+        .drain(..)
+        .map(|o| Arc::new(o.choices.clone().into_iter().collect::<Vec<_>>()))
+        .collect::<Vec<_>>()
+        .drain(..)
+        .map(|choice: Arc<Vec<ChatCompletionResponseStreamMessage>>| {
+            choice
+                .iter()
+                .map(|choice| choice.clone())
+                .collect::<Vec<_>>()
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+
+    is_running.store(false, Ordering::SeqCst);
     finish_prompt(is_running);
-    Ok(false)
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -294,12 +232,5 @@ mod tests {
             sanitize_input("foo\"bar".to_string()),
             "foo\\\"bar".to_string()
         );
-    }
-
-    #[test]
-    fn value_is_unquoted() {
-        use super::*;
-        let v: Value = serde_json::from_str(r#"{"a": "1"}"#).unwrap();
-        assert_eq!(value2unquoted_text(&v["a"]), "1");
     }
 }

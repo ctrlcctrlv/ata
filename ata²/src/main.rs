@@ -15,6 +15,8 @@
 //!  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //!  See the License for the specific language governing permissions and
 //!  limitations under the License.
+#![feature(let_chains)]
+#![feature(try_trait_v2)]
 
 #[macro_use]
 extern crate clap;
@@ -30,25 +32,26 @@ mod prompt;
 
 use ansi_colors::ColouredStr;
 use clap::Parser as _;
+use futures_util::lock::Mutex;
+use futures_util::task::Context;
+use futures_util::FutureExt;
 use rustyline::{error::ReadlineError, Cmd, Editor, KeyCode, KeyEvent, Modifiers};
+use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::task::JoinHandle;
 
 use std::fs::File;
 use std::io::Read;
 
 use std::fs;
-use std::result::Result;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
-use std::sync::mpsc::Receiver;
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
-use std::thread;
+use std::task::Poll;
 use std::time::Duration;
 
 use crate::args::Ata2;
 use crate::config::Config;
-use crate::prompt::print_error;
+use crate::prompt::TokioResult;
 
 #[tokio::main]
 pub async fn main() -> prompt::TokioResult<()> {
@@ -88,6 +91,7 @@ pub async fn main() -> prompt::TokioResult<()> {
 
     let config = Arc::new(Config::from(&contents));
     let config_clone = config.clone();
+    let config_clone2 = config.clone();
     let had_first_interrupt: AtomicBool = AtomicBool::new(false);
     config.validate().unwrap_or_else(|e| {
         error!("Config error!: {e}. Dying.");
@@ -115,7 +119,7 @@ pub async fn main() -> prompt::TokioResult<()> {
             );
         }
     }
-    if atty::is(atty::Stream::Stdin) {
+    if atty::is(atty::Stream::Stdin) && config.ui.save_history {
         if rl.load_history(&config.history_file).is_err() {
             warn!("No history file found. Creating a new one.");
             File::create(&config.history_file).unwrap_or_else(|e| {
@@ -125,132 +129,163 @@ pub async fn main() -> prompt::TokioResult<()> {
             });
         }
     }
-    let (tx, rx): (Sender<Option<String>>, Receiver<Option<String>>) = mpsc::channel();
+    // use tokio asynchronous message queue
+    let (tx, mut rx): (Sender<Option<String>>, Receiver<Option<String>>) =
+        tokio::sync::mpsc::channel(1);
     let is_running = Arc::new(AtomicBool::new(false));
     let is_running_clone = is_running.clone();
     let abort = Arc::new(AtomicBool::new(false));
     let abort_clone = abort.clone();
 
-    let handle = thread::spawn(move || {
+    let handle = tokio::spawn(async move {
         let abort = abort_clone.clone();
         let is_running = is_running.clone();
+        let n_pending_debug_log_notices = Arc::new(AtomicUsize::new(0));
         loop {
-            let msg: Result<_, _> = rx.recv();
+            let msg = Box::pin(rx.recv()).poll_unpin(&mut Context::from_waker(
+                futures_util::task::noop_waker_ref(),
+            ));
             match msg {
-                Ok(Some(line)) => {
-                    let mut retry = true;
-                    let mut count = 1;
-                    while retry {
-                        let result = prompt::request(
-                            abort.clone(),
-                            is_running.clone(),
-                            &config_clone,
-                            line.to_string(),
-                            count,
-                        );
-                        retry = match result {
-                            Ok(retry) => retry,
-                            Err(e) => {
-                                eprintln!();
-                                eprintln!();
-                                let msg = format!("prompt::request failed with: {e}");
-                                print_error(is_running.clone(), &msg);
-                                false
-                            }
-                        };
-                        count += 1;
-                        if retry {
-                            let duration = Duration::from_millis(500);
-                            thread::sleep(duration);
-                        } else {
-                            break;
+                Poll::Ready(Some(Some(line))) => {
+                    let result = prompt::request(
+                        abort.clone(),
+                        is_running.clone(),
+                        &config_clone,
+                        line.to_string(),
+                        0,
+                    )
+                    .await;
+                    assert!(result.is_ok());
+                    n_pending_debug_log_notices.store(0, Ordering::SeqCst);
+                }
+                Poll::Ready(Some(None) | None) => {
+                    n_pending_debug_log_notices.store(0, Ordering::SeqCst);
+                    break;
+                }
+                Poll::Pending => {
+                    // All the next 20 or so lines are just for debug logging…
+                    {
+                        n_pending_debug_log_notices.fetch_add(1, Ordering::SeqCst);
+                        let n = n_pending_debug_log_notices.load(Ordering::SeqCst);
+                        static MAX_PENDING_DEBUG_LOG_NOTICES: usize = 10;
+                        macro_rules! PENDING_LOOP_MSG {
+                            () => {
+                                "Got pending in API request loop, waiting 100ms ({n}/{max})"
+                            };
+                            ($msg:expr) => {
+                                concat!(
+                                    "Got pending in API request loop, waiting 100ms ({n}/{max}): ",
+                                    $msg
+                                )
+                            };
+                        }
+                        if n <= MAX_PENDING_DEBUG_LOG_NOTICES {
+                            debug!(
+                                PENDING_LOOP_MSG!(),
+                                n = n,
+                                max = MAX_PENDING_DEBUG_LOG_NOTICES
+                            );
+                        } else if n == 11 {
+                            debug!(PENDING_LOOP_MSG!("(will stop logging this message, but you can enable trace logging to see it again)"),
+                                   n = n,
+                                   max = MAX_PENDING_DEBUG_LOG_NOTICES);
+                        } else if n >= 12 {
+                            trace!(
+                                PENDING_LOOP_MSG!(),
+                                n = n,
+                                max = MAX_PENDING_DEBUG_LOG_NOTICES
+                            );
                         }
                     }
-                }
-                Ok(None) => {
-                    abort.store(true, Ordering::SeqCst);
-                    break;
-                }
-                Err(_) => {
-                    abort.store(true, Ordering::SeqCst);
-                    break;
+                    // …and now we're done with debug logging.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
                 }
             }
         }
     });
 
-    if atty::is(atty::Stream::Stdin) {
+    let rl = Arc::new(Mutex::new(rl));
+    let rl_clone = rl.clone();
+    let readline_handle: JoinHandle<TokioResult<()>> = tokio::spawn(async move {
+        // If stdin is not a tty, we want to read once to the end of it and then exit.
+        let mut already_read = false;
+        let mut stdin = std::io::stdin();
         prompt::print_prompt();
-    }
-
-    // If stdin is not a tty, we want to read once to the end of it and then exit.
-    let mut already_read = false;
-    let mut stdin = std::io::stdin();
-    loop {
-        // Using an empty prompt text because otherwise the user would
-        // "see" that the prompt is ready again during response printing.
-        // Also, the current readline is cleared in some cases by rustyline,
-        // so being on a newline is the only way to avoid that.
-        let readline = if atty::is(atty::Stream::Stdin) {
-            rl.readline("")
-        } else if !already_read {
-            let mut buf = String::with_capacity(1024);
-            stdin.read_to_string(&mut buf)?;
-            already_read = true;
-            Ok(buf)
-        } else {
-            Err(ReadlineError::Eof)
-        };
-        match readline {
-            Ok(line) => {
-                if is_running_clone.load(Ordering::SeqCst) {
-                    abort.store(true, Ordering::SeqCst);
-                }
-                if line.is_empty() {
-                    continue;
-                }
-                rl.add_history_entry(line.as_str());
-                tx.send(Some(line)).unwrap();
-                had_first_interrupt.store(false, Ordering::Relaxed);
-            }
-            Err(ReadlineError::Interrupted) => {
-                if is_running_clone.load(Ordering::SeqCst) {
-                    abort.store(true, Ordering::SeqCst);
-                } else {
-                    if config.ui.double_ctrlc && !had_first_interrupt.load(Ordering::Relaxed) {
-                        had_first_interrupt.store(true, Ordering::Relaxed);
-                        eprintln!("\nPress Ctrl-C again to exit.");
-                        thread::sleep(Duration::from_millis(100));
-                        eprintln!();
-                        prompt::print_prompt();
+        while !abort.load(Ordering::Relaxed) {
+            // lock Readlien
+            let mut rl = rl.lock().await;
+            // Using an empty prompt text because otherwise the user would
+            // "see" that the prompt is ready again during response printing.
+            // Also, the current readline is cleared in some cases by rustyline,
+            // so being on a newline is the only way to avoid that.
+            let readline = if atty::is(atty::Stream::Stdin) {
+                rl.readline("")
+            } else if !already_read {
+                let mut buf = String::with_capacity(1024);
+                stdin.read_to_string(&mut buf)?;
+                already_read = true;
+                Ok(buf)
+            } else {
+                Err(ReadlineError::Eof)?
+            };
+            match readline {
+                Ok(line) => {
+                    if is_running_clone.load(Ordering::SeqCst) {
+                        abort.store(true, Ordering::SeqCst);
+                    }
+                    if line.is_empty() {
                         continue;
+                    }
+                    rl.add_history_entry(line.as_str());
+                    tx.send(Some(line)).await?;
+                    had_first_interrupt.store(false, Ordering::Relaxed);
+                }
+                Err(ReadlineError::Interrupted) => {
+                    if is_running_clone.load(Ordering::SeqCst) {
+                        abort.store(true, Ordering::SeqCst);
                     } else {
-                        tx.send(None).unwrap();
-                        break;
+                        if config.ui.double_ctrlc && !had_first_interrupt.load(Ordering::Relaxed) {
+                            had_first_interrupt.store(true, Ordering::Relaxed);
+                            eprintln!("\nPress Ctrl-C again to exit.");
+                            tokio::time::sleep(Duration::from_millis(1000)).await;
+                            eprintln!();
+                            prompt::print_prompt();
+                            continue;
+                        } else {
+                            tx.send(None).await?;
+                            break;
+                        }
                     }
                 }
-            }
-            Err(ReadlineError::Eof) => {
-                tx.send(None).unwrap();
-                break;
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                tx.send(None).unwrap();
-                break;
+                Err(ReadlineError::Eof) => {
+                    tx.send(None).await?;
+                    break;
+                }
+                Err(err) => {
+                    eprintln!("{err:?}");
+                    tx.send(None).await?;
+                    break;
+                }
             }
         }
+        return Ok(());
+    });
+
+    tokio::select! {
+        _ = readline_handle => {}
+        _ = handle => {}
     }
 
-    handle.join().unwrap();
-
-    if atty::is(atty::Stream::Stdin) {
-        rl.save_history(&config.history_file)
+    if atty::is(atty::Stream::Stdin) && config_clone2.ui.save_history {
+        let mut rl_clone = rl_clone.lock().await;
+        rl_clone
+            .save_history(&config_clone2.history_file)
             .unwrap_or_else(|e| error!("Could not save history: {e}"));
         info!(
             "Saved history to {history_file}. Number of entries: {entries}",
-            history_file = config.history_file.to_string_lossy(),
-            entries = rl.history().len()
+            history_file = config_clone2.history_file.to_string_lossy(),
+            entries = rl_clone.history().len()
         );
     }
 

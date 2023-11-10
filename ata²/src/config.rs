@@ -50,6 +50,8 @@ pub struct UiConfig {
     pub redact_api_key: bool,
     /// Allow multiline insertions? If so, you end the input by sending an EOF (^D).
     pub multiline_insertions: bool,
+    /// Save history?
+    pub save_history: bool,
 }
 
 /// For definitions, see https://platform.openai.com/docs/api-reference/completions/create
@@ -188,6 +190,7 @@ impl Default for UiConfig {
             hide_config: false,
             redact_api_key: true,
             multiline_insertions: false,
+            save_history: true,
         }
     }
 }
