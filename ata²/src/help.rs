@@ -1,3 +1,5 @@
+//! Help messages for the command-line interface.
+//!
 //! # ata²
 //!
 //!	 © 2023    Fredrick R. Brennan <copypaste@kittens.ph>
@@ -22,9 +24,15 @@ use crate::config;
 use config::DEFAULT_CONFIG_FILENAME;
 use std::fs::{self, File};
 use std::io::Write as _;
+use std::process::exit;
 
 pub fn commands() {
     println!("
+Keyboard shortcuts:
+ata²-specific:
+Ctrl-D, EOF         (In multiline mode) Send the current message.
+
+rustyline:
 Ctrl-A, Home        Move cursor to the beginning of line
 Ctrl-B, Left        Move cursor one character left
 Ctrl-E, End         Move cursor to end of line
@@ -107,5 +115,5 @@ The `temperature` sets the `sampling temperature`. From the OpenAI API docs: "Wh
                 .expect("Unable to write to file");
         }
     }
-    std::process::exit(1);
+    exit(1);
 }

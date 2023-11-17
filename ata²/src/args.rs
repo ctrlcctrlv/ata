@@ -1,3 +1,5 @@
+//! Command-line argument parsing (using [`clap`]).
+//!
 //! # ata²
 //!
 //!	 © 2023    Fredrick R. Brennan <copypaste@kittens.ph>
@@ -15,20 +17,14 @@
 //!  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //!  See the License for the specific language governing permissions and
 //!  limitations under the License.
-//!
-//! Ask the Terminal Anything (ATA): OpenAI GPT in the terminal
 
 use crate::config::ConfigLocation;
 
 use clap::Parser;
-
-use once_cell::sync::Lazy;
-
-#[allow(non_upper_case_globals)]
-static AUTHORS: Lazy<&'static str> = Lazy::new(|| crate_authors!("\n\t"));
+use clap::{crate_authors, crate_version};
 
 #[derive(Parser, Debug)]
-#[command(author = &*AUTHORS, version = crate_version!(),
+#[command(author = crate_authors!(), version = crate_version!(),
     about, long_about = None,
     help_template = "{before-help}{name} {version} — {about}\
     \n\n\

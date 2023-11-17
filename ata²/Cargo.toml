@@ -1,5 +1,5 @@
 [package]
-name = "ata2"
+name = "ata"
 version = "3.0.0"
 edition = "2021"
 authors = ["Fredrick R. Brennan <copypaste@kittens.ph>", "Rik Huijzer <t.h.huijzer@rug.nl>", "ATA Project Authors"]
@@ -28,6 +28,7 @@ once_cell = "1.18.0"
 atty = "0.2.14"
 async-openai = { version = "0.16.2", features = ["native-tls-vendored"] }
 futures-util = { version = "0.3.29", features = ["io"] }
+tokio-stream = { version = "0.1.14", features = ["sync", "full"] }
 
 [dev-dependencies]
 pretty_assertions = "1"

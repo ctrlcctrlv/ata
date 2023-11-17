@@ -1,3 +1,5 @@
+//! Configuration file parsing and validation.
+//!
 //! # ata²
 //!
 //!	 © 2023    Fredrick R. Brennan <copypaste@kittens.ph>
@@ -18,6 +20,7 @@
 
 use std::collections::HashMap as StdHashMap;
 use std::convert::Infallible;
+use std::env;
 use std::ffi::OsString;
 use std::fmt::{self, Display};
 
@@ -59,7 +62,7 @@ pub struct UiConfig {
     pub history_file: PathBuf,
 }
 
-/// For definitions, see https://platform.openai.com/docs/api-reference/completions/create
+/// For definitions, see <https://platform.openai.com/docs/api-reference/completions/create>.
 #[repr(C)]
 #[derive(Clone, Deserialize, Debug, Serialize, Reflect)]
 #[serde(default)]
@@ -76,15 +79,15 @@ pub struct Config {
     pub presence_penalty: f64,
     pub frequency_penalty: f64,
     pub logit_bias: HashMap<String, f64>,
+    pub user_id: Option<String>,
     pub ui: UiConfig,
 }
 
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(api_key) = &self.api_key {
-            if api_key.is_empty() {
-                return Err(String::from("API key is empty"));
-            }
+        match self.api_key.as_ref().map(|s| s.as_str()) {
+            Some("") | None => return Err(String::from("API key is missing")),
+            _ => {}
         }
 
         if self.model.is_empty() {
@@ -127,6 +130,11 @@ impl Config {
             ));
         }
 
+        match self.user_id.as_ref().map(|s| s.as_str()) {
+            Some("") => return Err(String::from("User ID cannot be an empty string")),
+            _ => {}
+        }
+
         for (key, value) in &self.logit_bias {
             if value < &-2.0 || value > &2.0 {
                 return Err(format!(
@@ -140,35 +148,106 @@ impl Config {
     }
 }
 
+/// Note: the result is heavily based on the environment variables.
+///
+/// * `ATA2_MODEL` sets the model ID. Default: `gpt-3.5-turbo`.
+/// * `ATA2_MAX_TOKENS` sets the maximum amount of tokens that the server can answer with. Longer answers will be truncated. Default: `2048`.
+/// * `ATA2_TEMPERATURE`. Default: `0.8`.
+/// * `ATA2_SUFFIX` sets the suffix. Default: `None`.
+/// * `ATA2_TOP_P`. Default: `1.0`.
+/// * `ATA2_N`. Default: `1`.
+/// * `ATA2_STOP` sets the stop phrases. Default: `[]`.
+/// * `ATA2_PRESENCE_PENALTY`. Default: `0.0`.
+/// * `ATA2_FREQUENCY_PENALTY`. Default: `0.0`.
+/// * `ATA2_LOGIT_BIAS` sets the logit bias. Default: `{}`.
 impl Default for Config {
     fn default() -> Self {
         Self {
-            model: "text-davinci-003".into(),
-            max_tokens: 16,
-            temperature: 0.5,
-            suffix: None,
-            top_p: 1.0,
-            n: 1,
+            model: env::var("ATA2_MODEL")
+                .ok()
+                .unwrap_or_else(|| "gpt-3.5-turbo".to_string()),
+            max_tokens: env::var("ATA2_MAX_TOKENS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2048),
+            temperature: env::var("ATA2_TEMPERATURE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.8),
+            suffix: env::var("ATA2_SUFFIX").ok(),
+            top_p: env::var("ATA2_TOP_P")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1.0),
+            n: env::var("ATA2_N")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1),
             stream: true,
-            stop: vec![],
-            presence_penalty: 0.0,
-            frequency_penalty: 0.0,
-            logit_bias: HashMap::new(),
-            api_key: None,
+            stop: env::var("ATA2_STOP")
+                .ok()
+                .map(|s| serde_json::from_str(&s).unwrap())
+                .unwrap_or_else(|| vec![]),
+            presence_penalty: env::var("ATA2_PRESENCE_PENALTY")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0),
+            frequency_penalty: env::var("ATA2_FREQUENCY_PENALTY")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0),
+            logit_bias: env::var("ATA2_LOGIT_BIAS")
+                .ok()
+                .map(|s| serde_json::from_str(&s).unwrap())
+                .unwrap_or_else(|| HashMap::default()),
+            api_key: env::var("OPENAI_API_KEY").ok(),
+            user_id: env::var("ATA2_USER_ID").ok(),
             ui: UiConfig::default(),
         }
     }
 }
 
+/// Note: the result is heavily based on the environment variables.
+///
+/// * `ATA2_DOUBLE_CTRLC` sets whether to require user to press ^C twice. Default: `true`.
+/// * `ATA2_HIDE_CONFIG` sets whether to hide config on run. Default: `false`.
+/// * `ATA2_REDACT_API_KEY` sets whether to redact API key. Default: `true`.
+/// * `ATA2_MULTILINE_INSERTIONS` sets whether to allow multiline insertions. Default: `true`.
+/// * `ATA2_SAVE_HISTORY` sets whether to save history. Default: `true`.
+/// * `ATA2_HISTORY_FILE` sets the history file. Default: `~/.config/ata2/history`.
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            double_ctrlc: true,
-            hide_config: false,
-            redact_api_key: true,
-            multiline_insertions: false,
-            save_history: true,
-            history_file: PathBuf::from(get_config_dir::<2>().join("history")),
+            double_ctrlc: env::var("ATA2_DOUBLE_CTRLC")
+                .ok()
+                .map(|s| s.len() > 0)
+                .unwrap_or(true),
+            hide_config: env::var("ATA2_HIDE_CONFIG")
+                .ok()
+                .map(|s| s.len() > 0)
+                .unwrap_or(false),
+            redact_api_key: env::var("ATA2_REDACT_API_KEY")
+                .ok()
+                .map(|s| s.len() > 0)
+                .unwrap_or(true),
+            multiline_insertions: env::var("ATA2_MULTILINE_INSERTIONS")
+                .ok()
+                .map(|s| s.len() > 0)
+                .unwrap_or(true),
+            save_history: env::var("ATA2_SAVE_HISTORY")
+                .ok()
+                .map(|s| s.len() > 0)
+                .unwrap_or(true),
+            history_file: env::var("ATA2_HISTORY_FILE")
+                .ok()
+                .map(|s| PathBuf::from(s))
+                .unwrap_or_else(|| {
+                    get_config_dir::<2>()
+                        .join("history")
+                        .to_string_lossy()
+                        .to_string()
+                        .into()
+                }),
         }
     }
 }
@@ -208,7 +287,7 @@ impl<'a> Into<CreateChatCompletionRequestArgs> for &'a Config {
         if !self.stream {
             warn!("Stream is disabled. This is not supported anymore and will be ignored.");
         }
-        CreateChatCompletionRequestArgs::default()
+        let mut args = CreateChatCompletionRequestArgs::default()
             .n(self.n as u8)
             .model(&self.model)
             .max_tokens(self.max_tokens as u16)
@@ -225,7 +304,13 @@ impl<'a> Into<CreateChatCompletionRequestArgs> for &'a Config {
             .top_p(self.top_p as f32)
             .stop(self.stop.clone())
             .stream(true)
-            .to_owned()
+            .to_owned();
+
+        if let Some(user_id) = &self.user_id {
+            args = args.user(user_id).to_owned();
+        }
+
+        args
     }
 }
 

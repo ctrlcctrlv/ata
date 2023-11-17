@@ -1,4 +1,4 @@
-//! # ata²
+//! # ata² — Ask the Terminal Anything²
 //!
 //!	 © 2023    Fredrick R. Brennan <copypaste@kittens.ph>
 //!	 © 2023    Rik Huijzer <t.h.huijzer@rug.nl>
@@ -16,80 +16,42 @@
 //!  See the License for the specific language governing permissions and
 //!  limitations under the License.
 #[macro_use]
-extern crate clap;
-#[macro_use]
 extern crate lazy_static;
 #[macro_use]
 extern crate log;
 
 mod args;
+pub use crate::args::Ata2;
 mod config;
+pub use crate::config::Config;
 mod help;
 mod prompt;
+mod readline;
+mod state;
+pub use crate::state::*;
 
 use ansi_colors::ColouredStr;
-use clap::Parser as _;
-use futures_util::lock::Mutex;
+use futures_util::future::FutureExt as _;
 use futures_util::task::Context;
-use futures_util::FutureExt;
-use rustyline::{error::ReadlineError, Cmd, Editor, KeyCode, KeyEvent, Modifiers};
-use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::task::JoinHandle;
+use futures_util::task::Poll;
 
+use std::error::Error;
 use std::fs::File;
-use std::io::Read;
 
-use std::fs;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::Duration;
 
-use crate::args::Ata2;
-use crate::config::Config;
-use crate::prompt::TokioResult;
-
+pub type TokioResult<S = dyn Send + Sync, E = Box<dyn Error + Send + Sync>> = Result<S, E>;
 #[tokio::main]
-pub async fn main() -> prompt::TokioResult<()> {
+pub async fn main() -> TokioResult<()> {
     init_logger();
-    let flags: Ata2 = Ata2::parse();
-    if flags.print_shortcuts {
-        help::commands();
+    let mut rl = readline::Readline::new();
+    if EXIT.load(Ordering::SeqCst) {
         return Ok(());
     }
-    let filename = flags.config.location();
-    if !filename.exists() {
-        let v1_filename = flags.config.location_v1();
-        if v1_filename.exists() {
-            fs::create_dir_all(&config::default_path::<2>(None).parent().unwrap())
-                .expect("Could not make configuration directory");
-            fs::copy(&v1_filename, &filename).expect(&format!(
-                "Failed to copy {} to {}",
-                v1_filename.to_string_lossy(),
-                filename.to_string_lossy()
-            ));
-            warn!(
-                "{}",
-                &format!(
-                    "Copied old configuration file to ata¹'s location {}",
-                    filename.to_string_lossy()
-                ),
-            );
-        } else {
-            help::missing_toml();
-        }
-    }
-    let mut contents = String::new();
-    File::open(filename)
-        .unwrap()
-        .read_to_string(&mut contents)
-        .expect("Could not read configuration file");
-
-    let config = Arc::new(Config::from(&contents));
-    let config_clone = config.clone();
-    let config_clone2 = config.clone();
-    let had_first_interrupt: AtomicBool = AtomicBool::new(false);
+    let config = CONFIGURATION.clone();
     config.validate().unwrap_or_else(|e| {
         error!("Config error!: {e}. Dying.");
         panic!()
@@ -102,22 +64,11 @@ pub async fn main() -> prompt::TokioResult<()> {
         eprint!("{}", header);
     }
 
-    if !flags.hide_config && !config.ui.hide_config && atty::is(atty::Stream::Stderr) {
+    if !FLAGS.hide_config && !config.ui.hide_config && atty::is(atty::Stream::Stderr) {
         eprintln!("{config}");
     }
-    let mut rl = Editor::<()>::new()?;
-    if config.ui.multiline_insertions {
-        if atty::is(atty::Stream::Stdin) {
-            // Cmd::Newline inserts a newline, Cmd::AcceptLine accepts the line
-            rl.bind_sequence(KeyEvent(KeyCode::Enter, Modifiers::NONE), Cmd::Newline);
-            rl.bind_sequence(
-                KeyEvent(KeyCode::Char('d'), Modifiers::CTRL),
-                Cmd::AcceptLine,
-            );
-        }
-    }
     if atty::is(atty::Stream::Stdin) && config.ui.save_history {
-        if rl.load_history(&config.ui.history_file).is_err() {
+        if rl.load_history().await.is_err() {
             warn!("No history file found. Creating a new one.");
             File::create(&config.ui.history_file).unwrap_or_else(|e| {
                 error!("Could not create history file: {e}");
@@ -126,32 +77,21 @@ pub async fn main() -> prompt::TokioResult<()> {
             });
         }
     }
+    rl.enable_multiline().await;
     // use tokio asynchronous message queue
-    let (tx, mut rx): (Sender<Option<String>>, Receiver<Option<String>>) =
+    let (tx, mut rx): (tokio::sync::mpsc::Sender<Option<String>>, _) =
         tokio::sync::mpsc::channel(1);
-    let is_running = Arc::new(AtomicBool::new(false));
-    let is_running_clone = is_running.clone();
-    let abort = Arc::new(AtomicBool::new(false));
-    let abort_clone = abort.clone();
 
     let handle = tokio::spawn(async move {
-        let abort = abort_clone.clone();
-        let is_running = is_running.clone();
         let n_pending_debug_log_notices = Arc::new(AtomicUsize::new(0));
         loop {
             let msg = Box::pin(rx.recv()).poll_unpin(&mut Context::from_waker(
                 futures_util::task::noop_waker_ref(),
             ));
             match msg {
+                Poll::Pending => {}
                 Poll::Ready(Some(Some(line))) => {
-                    let result = prompt::request(
-                        abort.clone(),
-                        is_running.clone(),
-                        &config_clone,
-                        line.to_string(),
-                        0,
-                    )
-                    .await;
+                    let result = prompt::request(line.to_string(), 0).await;
                     match result {
                         Ok(_) => {}
                         Err(e) => {
@@ -160,23 +100,23 @@ pub async fn main() -> prompt::TokioResult<()> {
                     }
                     n_pending_debug_log_notices.store(0, Ordering::SeqCst);
                 }
-                Poll::Ready(Some(None) | None) => {
+                Poll::Ready(Some(None)) => {
                     n_pending_debug_log_notices.store(0, Ordering::SeqCst);
+                    info!("Got None in API request loop, exiting");
                     break;
                 }
-                Poll::Pending => {
+                Poll::Ready(None) => {
                     // All the next 20 or so lines are just for debug logging…
                     {
-                        n_pending_debug_log_notices.fetch_add(1, Ordering::SeqCst);
-                        let n = n_pending_debug_log_notices.load(Ordering::SeqCst);
+                        let n = n_pending_debug_log_notices.fetch_add(1, Ordering::SeqCst);
                         static MAX_PENDING_DEBUG_LOG_NOTICES: usize = 10;
                         macro_rules! PENDING_LOOP_MSG {
                             () => {
-                                "Got pending in API request loop, waiting 100ms ({n}/{max})"
+                                "Got pending in API request loop, waiting 10ms ({n}/{max})"
                             };
                             ($msg:expr) => {
                                 concat!(
-                                    "Got pending in API request loop, waiting 100ms ({n}/{max}): ",
+                                    "Got pending in API request loop, waiting 10ms ({n}/{max}): ",
                                     $msg
                                 )
                             };
@@ -200,94 +140,30 @@ pub async fn main() -> prompt::TokioResult<()> {
                         }
                     }
                     // …and now we're done with debug logging.
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 }
             }
         }
     });
 
-    let rl = Arc::new(Mutex::new(rl));
-    let rl_clone = rl.clone();
-    let readline_handle: JoinHandle<TokioResult<()>> = tokio::spawn(async move {
-        // If stdin is not a tty, we want to read once to the end of it and then exit.
-        let mut already_read = false;
-        let mut stdin = std::io::stdin();
-        prompt::print_prompt();
-        while !abort.load(Ordering::Relaxed) {
-            // lock Readlien
-            let mut rl = rl.lock().await;
-            // Using an empty prompt text because otherwise the user would
-            // "see" that the prompt is ready again during response printing.
-            // Also, the current readline is cleared in some cases by rustyline,
-            // so being on a newline is the only way to avoid that.
-            let readline = if atty::is(atty::Stream::Stdin) {
-                rl.readline("")
-            } else if !already_read {
-                let mut buf = String::with_capacity(1024);
-                stdin.read_to_string(&mut buf)?;
-                already_read = true;
-                Ok(buf)
-            } else {
-                Err(ReadlineError::Eof)?
-            };
-            match readline {
-                Ok(line) => {
-                    if is_running_clone.load(Ordering::SeqCst) {
-                        abort.store(true, Ordering::SeqCst);
-                    }
-                    if line.is_empty() {
-                        continue;
-                    }
-                    rl.add_history_entry(line.as_str());
-                    tx.send(Some(line)).await?;
-                    had_first_interrupt.store(false, Ordering::Relaxed);
-                }
-                Err(ReadlineError::Interrupted) => {
-                    if is_running_clone.load(Ordering::SeqCst) {
-                        abort.store(true, Ordering::SeqCst);
-                    } else {
-                        if config.ui.double_ctrlc && !had_first_interrupt.load(Ordering::Relaxed) {
-                            had_first_interrupt.store(true, Ordering::Relaxed);
-                            eprintln!("\nPress Ctrl-C again to exit.");
-                            tokio::time::sleep(Duration::from_millis(1000)).await;
-                            eprintln!();
-                            prompt::print_prompt();
-                            continue;
-                        } else {
-                            tx.send(None).await?;
-                            break;
-                        }
-                    }
-                }
-                Err(ReadlineError::Eof) => {
-                    tx.send(None).await?;
-                    break;
-                }
-                Err(err) => {
-                    eprintln!("{err:?}");
-                    tx.send(None).await?;
-                    break;
-                }
-            }
-        }
-        return Ok(());
-    });
+    let readline_handle = rl.handle(tx);
 
     tokio::select! {
-        _ = readline_handle => {}
-        _ = handle => {}
+        _ = readline_handle => {
+            info!("Readline died");
+        }
+        _ = handle => {
+            info!("API request loop died");
+        }
     }
 
-    if atty::is(atty::Stream::Stdin) && config_clone2.ui.save_history {
-        let mut rl_clone = rl_clone.lock().await;
-        rl_clone
-            .save_history(&config_clone2.ui.history_file)
-            .unwrap_or_else(|e| error!("Could not save history: {e}"));
+    if atty::is(atty::Stream::Stdin) && config.ui.save_history {
+        rl.save_history().await?;
         info!(
             "Saved history to {history_file}. Number of entries: {entries}",
-            history_file = config_clone2.ui.history_file.to_string_lossy(),
-            entries = rl_clone.history().len()
+            history_file = config.ui.history_file.to_string_lossy(),
+            entries = rl.history_len().await
         );
     }
 

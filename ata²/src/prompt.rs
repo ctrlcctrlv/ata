@@ -1,3 +1,5 @@
+//! REPL
+//!
 //! # ata²
 //!
 //!	 © 2023    Fredrick R. Brennan <copypaste@kittens.ph>
@@ -20,33 +22,40 @@ use ansi_colors::ColouredStr;
 use async_openai::{
     config::OpenAIConfig,
     types::{
-        ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStreamMessage,
-        CreateChatCompletionRequestArgs, FinishReason,
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
+        ChatCompletionResponseStreamMessage, CreateChatCompletionRequestArgs, FinishReason,
     },
     Client,
 };
 use atty;
 use log::debug;
+use tokio_stream::StreamExt as _;
 
-use futures_util::StreamExt as _;
-
-use std::error::Error;
 use std::io::Write;
-use std::result::Result;
+use std::io::{self, Stderr, Stdout};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-pub type TokioResult<T, E = Box<dyn Error + Send + Sync>> = Result<T, E>;
+use crate::TokioResult;
+use crate::ABORT;
+use crate::CONFIGURATION;
+use crate::IS_RUNNING;
+
+lazy_static! {
+    static ref STDOUT: Stdout = io::stdout();
+    static ref STDERR: Stderr = io::stderr();
+    pub static ref CONVERSATION: Vec<ChatCompletionRequestMessage> = vec![];
+}
 
 fn print_and_flush(text: &str) {
     print!("{text}");
-    std::io::stdout().flush().unwrap();
+    (&*STDOUT).flush().unwrap();
 }
 
 fn eprint_and_flush(text: &str) {
     eprint!("{text}");
-    std::io::stderr().flush().unwrap();
+    (&*STDERR).flush().unwrap();
 }
 
 pub fn eprint_bold(msg: &str) {
@@ -72,15 +81,15 @@ fn print_response_prompt() {
     }
 }
 
-fn finish_prompt(is_running: Arc<AtomicBool>) {
-    is_running.store(false, Ordering::SeqCst);
+fn finish_prompt() {
+    IS_RUNNING.store(false, Ordering::SeqCst);
     eprint_and_flush("\n\n");
     print_prompt();
 }
 
-pub fn print_error(is_running: Arc<AtomicBool>, msg: &str) {
+pub fn print_error(msg: &str) {
     error!("{msg}");
-    finish_prompt(is_running)
+    finish_prompt()
 }
 
 fn store_and_do_nothing(print_buffer: &mut Vec<String>, text: &str) -> String {
@@ -113,13 +122,11 @@ fn post_process(print_buffer: &mut Vec<String>, text: &str) -> String {
 }
 
 pub async fn request(
-    abort: Arc<AtomicBool>,
-    is_running: Arc<AtomicBool>,
-    config: &super::Config,
     prompt: String,
     _count: i64,
 ) -> TokioResult<Vec<ChatCompletionResponseStreamMessage>> {
     let mut print_buffer: Vec<String> = Vec::new();
+    let config = &*CONFIGURATION.to_owned();
     let oconfig: OpenAIConfig = config.into();
     let openai = Client::with_config(oconfig);
     let completions = openai.chat();
@@ -129,16 +136,16 @@ pub async fn request(
         .build()?
         .into()]);
     let mut stream = completions.create_stream(args.build()?).await?;
-    is_running.store(true, Ordering::SeqCst);
+    IS_RUNNING.store(true, Ordering::SeqCst);
 
     let got_first_success: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let mut ret = vec![];
 
-    'abort: while !abort.load(Ordering::Relaxed) {
-        'outer: while let Some(completion) = stream.next().await {
-            debug!("Completion: {:?}", completion);
-            match completion {
-                Ok(completion) => {
+    'abort: while !ABORT.load(Ordering::Relaxed) {
+        'outer: loop {
+            let c = stream.next().await;
+            match c {
+                Some(Ok(completion)) => {
                     let completion = Arc::new(completion);
                     ret.push(completion.clone());
                     if !got_first_success.load(Ordering::SeqCst) {
@@ -146,20 +153,8 @@ pub async fn request(
                         print_response_prompt();
                     }
                     for choice in &completion.choices {
-                        if abort.load(Ordering::Relaxed) {
+                        if ABORT.load(Ordering::Relaxed) {
                             break 'abort;
-                        }
-                        match choice.finish_reason {
-                            Some(FinishReason::Stop) => {
-                                debug!("Got stop from API, returning to REPL");
-                                break 'abort;
-                            }
-                            Some(reason) => {
-                                let msg = format!("OpenAI API error: {reason:?}");
-                                print_error(is_running.clone(), &msg);
-                                continue 'abort;
-                            }
-                            None => {}
                         }
                         match choice.delta.content {
                             Some(ref text) => {
@@ -170,21 +165,39 @@ pub async fn request(
                                 continue 'outer;
                             }
                         }
+                        match choice.finish_reason {
+                            Some(FinishReason::Stop) => {
+                                debug!("Got stop from API, returning to REPL");
+                                break 'abort;
+                            }
+                            Some(reason) => {
+                                let msg = format!("OpenAI API error: {reason:?}");
+                                print_error(&msg);
+                                continue 'abort;
+                            }
+                            None => {
+                                continue;
+                            }
+                        }
                     }
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     let msg = format!("OpenAI API error: {e}");
-                    print_error(is_running.clone(), &msg);
+                    print_error(&msg);
+                    break 'abort;
+                }
+                None => {
+                    let msg = format!("OpenAI API error: no response");
+                    print_error(&msg);
                     continue 'abort;
                 }
             }
         }
-        break 'abort;
     }
 
     if !got_first_success.load(Ordering::SeqCst) {
         let msg = format!("Empty prompt, aborting.");
-        print_error(is_running.clone(), &msg);
+        print_error(&msg);
         return Ok(vec![]);
     }
 
@@ -203,7 +216,7 @@ pub async fn request(
         .flatten()
         .collect::<Vec<_>>();
 
-    is_running.store(false, Ordering::SeqCst);
-    finish_prompt(is_running);
+    IS_RUNNING.store(false, Ordering::SeqCst);
+    finish_prompt();
     Ok(result)
 }
