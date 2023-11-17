@@ -44,7 +44,7 @@ lazy_static! {
             let v1_filename = FLAGS.config.location_v1();
             if v1_filename.exists() {
                 fs::create_dir_all(&config::default_path::<2>(None).parent().unwrap())
-                    .expect("Could not make CONFIGURATION directory");
+                    .expect("Could not make configuration directory");
                 fs::copy(&v1_filename, &filename).expect(&format!(
                     "Failed to copy {} to {}",
                     v1_filename.to_string_lossy(),
@@ -53,7 +53,7 @@ lazy_static! {
                 warn!(
                     "{}",
                     &format!(
-                        "Copied old CONFIGURATION file to ata¹'s location {}",
+                        "Copied old configuration file to ata¹'s location {}",
                         filename.to_string_lossy()
                     ),
                 );
@@ -65,7 +65,7 @@ lazy_static! {
         File::open(filename)
             .unwrap()
             .read_to_string(&mut contents)
-            .expect("Could not read CONFIGURATION file");
+            .expect("Could not read configuration file");
 
         let config_ = Arc::new(Config::from(&contents));
         config_

@@ -47,14 +47,15 @@ use std::time::Duration;
 pub type TokioResult<S = dyn Send + Sync, E = Box<dyn Error + Send + Sync>> = Result<S, E>;
 #[tokio::main]
 pub async fn main() -> TokioResult<()> {
-    init_logger();
+    if EXIT.load(Ordering::Acquire) {
+        std::process::exit(0);
+    } else {
+        init_logger();
+    }
     if FLAGS.load.is_some() {
         load_conversation(FLAGS.load.as_ref().unwrap()).await?;
     }
     let mut rl = readline::Readline::new();
-    if EXIT.load(Ordering::SeqCst) {
-        return Ok(());
-    }
     let config = CONFIGURATION.clone();
     config.validate().unwrap_or_else(|e| {
         error!("Config error!: {e}. Dying.");
