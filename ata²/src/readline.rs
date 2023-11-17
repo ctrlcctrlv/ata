@@ -21,20 +21,26 @@
 //!  limitations under the License.
 
 use async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, Role,
+    ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
+    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent, Role,
 };
 use futures_util::lock::Mutex;
 use rustyline::error::ReadlineError;
-use rustyline::{Cmd, Editor, KeyCode, KeyEvent, Modifiers};
+use rustyline::{
+    Cmd, ConditionalEventHandler, Editor, EventContext, EventHandler, KeyCode, KeyEvent, Modifiers,
+    RepeatCount,
+};
+use std::future::IntoFuture;
 use std::io::Read as _;
+use std::io::Write as _;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::prompt;
+use crate::prompt::{self, CONVERSATION};
 use crate::TokioResult;
 use crate::ABORT;
 use crate::CONFIGURATION as config;
@@ -50,6 +56,14 @@ pub fn string_to_chat_completion_request_user_message(
     })
 }
 
+pub fn string_to_chat_completion_assistant_message(string: String) -> ChatCompletionRequestMessage {
+    ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+        role: Role::Assistant,
+        content: Some(string),
+        ..Default::default()
+    })
+}
+
 pub struct Readline {
     pub rl: Arc<Mutex<Editor<()>>>,
 }
@@ -60,6 +74,36 @@ impl Readline {
         Self {
             rl: Arc::new(Mutex::new(rl)),
         }
+    }
+}
+
+use futures_util::FutureExt as _;
+
+struct RequestSaveHandler;
+impl ConditionalEventHandler for RequestSaveHandler {
+    fn handle(
+        &self,
+        _event: &rustyline::Event,
+        _n: RepeatCount,
+        _positive: bool,
+        _: &EventContext,
+    ) -> Option<Cmd> {
+        let convo = CONVERSATION.lock().into_future();
+        let convo = convo.now_or_never().unwrap();
+        let convo = convo.clone();
+        let convo_json = serde_json::to_string(&convo).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // as unix secs
+        let filename = format!("conversation-{}.json", now);
+        let _ = std::fs::remove_file(&filename);
+        let convo_file = std::fs::File::create(&filename).unwrap();
+        let mut convo_file = std::io::BufWriter::new(convo_file);
+        convo_file.write_all(convo_json.as_bytes()).unwrap();
+        info!("Saved conversation to {filename}");
+        Some(Cmd::Noop)
     }
 }
 
@@ -98,9 +142,7 @@ impl Readline {
                         HAD_FIRST_INTERRUPT.store(false, Ordering::Relaxed);
                     }
                     Err(ReadlineError::Interrupted) => {
-                        if config.ui.double_ctrlc
-                            && !HAD_FIRST_INTERRUPT.load(Ordering::Relaxed)
-                        {
+                        if config.ui.double_ctrlc && !HAD_FIRST_INTERRUPT.load(Ordering::Relaxed) {
                             HAD_FIRST_INTERRUPT.store(true, Ordering::Relaxed);
                             eprint!("\nPress Ctrl-C again to exit.");
                             prompt::print_prompt();
@@ -139,6 +181,16 @@ impl Readline {
                     Cmd::AcceptLine,
                 );
             }
+        }
+    }
+
+    pub async fn enable_request_save(&mut self) {
+        let mut rl = self.rl.lock().await;
+        if atty::is(atty::Stream::Stdin) {
+            rl.bind_sequence(
+                KeyEvent(KeyCode::F(2), Modifiers::NONE),
+                EventHandler::Conditional(Box::new(RequestSaveHandler)),
+            );
         }
     }
 

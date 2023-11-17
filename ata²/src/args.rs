@@ -45,4 +45,8 @@ pub struct Ata2 {
     /// Print the keyboard shortcuts.
     #[arg(long)]
     pub print_shortcuts: bool,
+
+    /// Conversation file to load.
+    #[arg(short = 'l', long = "load")]
+    pub load: Option<String>,
 }

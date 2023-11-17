@@ -22,24 +22,25 @@ use ansi_colors::ColouredStr;
 use async_openai::{
     config::OpenAIConfig,
     types::{
-        ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
-        ChatCompletionResponseStreamMessage, CreateChatCompletionRequestArgs, FinishReason,
+        ChatCompletionRequestMessage, ChatCompletionResponseStreamMessage,
+        CreateChatCompletionRequestArgs, FinishReason,
     },
     Client,
 };
 use atty;
-use std::future::IntoFuture;
 use log::debug;
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt as _;
 
-use std::io::Write;
 use std::io::{self, Stderr, Stdout};
+use std::io::{Read as _, Write as _};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::readline::string_to_chat_completion_request_user_message;
+use crate::readline::{
+    string_to_chat_completion_assistant_message, string_to_chat_completion_request_user_message,
+};
 use crate::TokioResult;
 use crate::ABORT;
 use crate::CONFIGURATION;
@@ -49,6 +50,24 @@ lazy_static! {
     static ref STDOUT: Stdout = io::stdout();
     static ref STDERR: Stderr = io::stderr();
     pub static ref CONVERSATION: Mutex<Vec<ChatCompletionRequestMessage>> = Mutex::new(vec![]);
+}
+
+pub async fn load_conversation<P: AsRef<std::path::Path>>(path: P) -> TokioResult<()> {
+    let mut file = std::fs::File::open(path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    let lines = contents.split("\n").collect::<Vec<_>>();
+    let mut conversation = CONVERSATION.lock().await;
+    let loaded_conversation = serde_json::from_str::<Vec<ChatCompletionRequestMessage>>(
+        &lines
+            .into_iter()
+            .filter(|o| !o.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )?;
+    conversation.clear();
+    conversation.extend(loaded_conversation);
+    Ok(())
 }
 
 fn print_and_flush(text: &str) {
@@ -139,15 +158,16 @@ pub async fn request(
             .push(string_to_chat_completion_request_user_message(
                 prompt.clone(),
             ));
-        CONVERSATION.lock().await.clone().into_iter().collect::<Vec<_>>()
+        CONVERSATION
+            .lock()
+            .await
+            .clone()
+            .into_iter()
+            .collect::<Vec<_>>()
     };
     let mut request: CreateChatCompletionRequestArgs = config.into();
     let mut stream = completions
-        .create_stream(
-            request
-                .messages(messages)
-                .build()?,
-        )
+        .create_stream(request.messages(messages).build()?)
         .await?;
     IS_RUNNING.store(true, Ordering::SeqCst);
 
@@ -173,8 +193,7 @@ pub async fn request(
                                 let newline_fixed = post_process(&mut print_buffer, &text);
                                 print_and_flush(&newline_fixed);
                             }
-                            None => {
-                            }
+                            None => {}
                         }
                         match choice.finish_reason {
                             Some(FinishReason::Stop) => {
@@ -187,8 +206,7 @@ pub async fn request(
                                 print_error(&msg);
                                 continue 'abort;
                             }
-                            None => {
-                            }
+                            None => {}
                         }
                     }
                 }
@@ -225,25 +243,16 @@ pub async fn request(
         .flatten()
         .collect::<Vec<_>>();
 
-    let complete_message = ret
-        .iter()
-        .map(|o| o.choices.clone().into_iter().collect::<Vec<_>>());
+    let complete_message = result.iter().map(|o| o.delta.clone()).collect::<Vec<_>>();
 
-    let mut assistant_msg = ChatCompletionRequestAssistantMessage::default();
-    assistant_msg.content = Some(
+    let assistant_msg = string_to_chat_completion_assistant_message(
         complete_message
             .into_iter()
-            .flatten()
-            .map(|o| o.delta.content.unwrap())
-            .map(|o| post_process(&mut print_buffer, &o))
+            .map(|o| o.content.unwrap_or_else(String::new))
             .collect::<Vec<_>>()
             .join(""),
     );
-    (*CONVERSATION)
-        .lock()
-        .into_future()
-        .await
-        .push(ChatCompletionRequestMessage::Assistant(assistant_msg));
+    (*CONVERSATION).lock().await.push(assistant_msg);
 
     IS_RUNNING.store(false, Ordering::SeqCst);
     finish_prompt();

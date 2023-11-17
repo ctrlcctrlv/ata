@@ -26,6 +26,7 @@ mod config;
 pub use crate::config::Config;
 mod help;
 mod prompt;
+use crate::prompt::load_conversation;
 mod readline;
 mod state;
 pub use crate::state::*;
@@ -47,6 +48,9 @@ pub type TokioResult<S = dyn Send + Sync, E = Box<dyn Error + Send + Sync>> = Re
 #[tokio::main]
 pub async fn main() -> TokioResult<()> {
     init_logger();
+    if FLAGS.load.is_some() {
+        load_conversation(FLAGS.load.as_ref().unwrap()).await?;
+    }
     let mut rl = readline::Readline::new();
     if EXIT.load(Ordering::SeqCst) {
         return Ok(());
@@ -78,6 +82,7 @@ pub async fn main() -> TokioResult<()> {
         }
     }
     rl.enable_multiline().await;
+    rl.enable_request_save().await;
     // use tokio asynchronous message queue
     let (tx, mut rx): (tokio::sync::mpsc::Sender<Option<String>>, _) =
         tokio::sync::mpsc::channel(1);
@@ -170,7 +175,7 @@ pub async fn main() -> TokioResult<()> {
 }
 
 fn init_logger() {
-    let env = env_logger::Env::default().default_filter_or("warn");
+    let env = env_logger::Env::default().default_filter_or("info");
     env_logger::Builder::from_env(env)
         .format_timestamp(None)
         .init();
