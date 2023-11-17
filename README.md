@@ -2,9 +2,7 @@
 
 <h3 align="center">ChatGPT in the terminal</h3>
 
-<p align="center">
-  <a href="https://asciinema.org/a/565384"><img src="https://asciinema.org/a/565384.svg" alt="asciicast"></a>
-</p>
+[![asciicast](https://asciinema.org/a/sOgAo4BkUXBJTSgyjIZw2mnFr.svg)](https://asciinema.org/a/sOgAo4BkUXBJTSgyjIZw2mnFr)
 
 ## This is a fork!
 
