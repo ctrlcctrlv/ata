@@ -119,30 +119,16 @@ pub async fn request(
     prompt: String,
     _count: i64,
 ) -> TokioResult<Vec<ChatCompletionResponseStreamMessage>> {
-    let api_key: String = config.clone().api_key;
-    let model: String = config.clone().model;
-    let max_tokens: i64 = config.clone().max_tokens;
-    let temperature: f64 = config.temperature;
-
     let mut print_buffer: Vec<String> = Vec::new();
-    let oconfig = OpenAIConfig::new().with_api_key(api_key);
+    let oconfig: OpenAIConfig = config.into();
     let openai = Client::with_config(oconfig);
     let completions = openai.chat();
-    let mut stream = completions
-        .create_stream(
-            CreateChatCompletionRequestArgs::default()
-                .n(1)
-                .messages(vec![ChatCompletionRequestUserMessageArgs::default()
-                    .content(prompt)
-                    .build()?
-                    .into()])
-                .model(&model)
-                .max_tokens(max_tokens as u16)
-                .temperature(temperature as f32)
-                .stream(true)
-                .build()?,
-        )
-        .await?;
+    let mut args: CreateChatCompletionRequestArgs = config.into();
+    args.messages(vec![ChatCompletionRequestUserMessageArgs::default()
+        .content(prompt)
+        .build()?
+        .into()]);
+    let mut stream = completions.create_stream(args.build()?).await?;
     is_running.store(true, Ordering::SeqCst);
 
     let got_first_success: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
@@ -220,17 +206,4 @@ pub async fn request(
     is_running.store(false, Ordering::SeqCst);
     finish_prompt(is_running);
     Ok(result)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn leading_newlines() {
-        assert_eq!(
-            sanitize_input("foo\"bar".to_string()),
-            "foo\\\"bar".to_string()
-        );
-    }
 }

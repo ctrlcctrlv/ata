@@ -120,9 +120,9 @@ pub async fn main() -> prompt::TokioResult<()> {
         }
     }
     if atty::is(atty::Stream::Stdin) && config.ui.save_history {
-        if rl.load_history(&config.history_file).is_err() {
+        if rl.load_history(&config.ui.history_file).is_err() {
             warn!("No history file found. Creating a new one.");
-            File::create(&config.history_file).unwrap_or_else(|e| {
+            File::create(&config.ui.history_file).unwrap_or_else(|e| {
                 error!("Could not create history file: {e}");
                 warn!("Using /dev/null as history file.");
                 File::open("/dev/null").unwrap()
@@ -155,7 +155,12 @@ pub async fn main() -> prompt::TokioResult<()> {
                         0,
                     )
                     .await;
-                    assert!(result.is_ok());
+                    match result {
+                        Ok(_) => {}
+                        Err(e) => {
+                            error!("failed to request: {e}");
+                        }
+                    }
                     n_pending_debug_log_notices.store(0, Ordering::SeqCst);
                 }
                 Poll::Ready(Some(None) | None) => {
@@ -280,11 +285,11 @@ pub async fn main() -> prompt::TokioResult<()> {
     if atty::is(atty::Stream::Stdin) && config_clone2.ui.save_history {
         let mut rl_clone = rl_clone.lock().await;
         rl_clone
-            .save_history(&config_clone2.history_file)
+            .save_history(&config_clone2.ui.history_file)
             .unwrap_or_else(|e| error!("Could not save history: {e}"));
         info!(
             "Saved history to {history_file}. Number of entries: {entries}",
-            history_file = config_clone2.history_file.to_string_lossy(),
+            history_file = config_clone2.ui.history_file.to_string_lossy(),
             entries = rl_clone.history().len()
         );
     }

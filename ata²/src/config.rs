@@ -16,6 +16,7 @@
 //!  See the License for the specific language governing permissions and
 //!  limitations under the License.
 
+use std::collections::HashMap as StdHashMap;
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fmt::{self, Display};
@@ -24,12 +25,14 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use ansi_colors::ColouredStr;
+use async_openai::{config::OpenAIConfig, types::CreateChatCompletionRequestArgs};
 use bevy_reflect::{Reflect, Struct};
 use bevy_utils::HashMap;
 use directories::ProjectDirs;
 use os_str_bytes::OsStrBytes as _;
 use os_str_bytes::OsStringBytes as _;
 use serde::{Deserialize, Serialize};
+use serde_json::{Number, Value};
 use toml::de::Error as TomlError;
 
 lazy_static! {
@@ -52,6 +55,8 @@ pub struct UiConfig {
     pub multiline_insertions: bool,
     /// Save history?
     pub save_history: bool,
+    /// History file
+    pub history_file: PathBuf,
 }
 
 /// For definitions, see https://platform.openai.com/docs/api-reference/completions/create
@@ -59,7 +64,7 @@ pub struct UiConfig {
 #[derive(Clone, Deserialize, Debug, Serialize, Reflect)]
 #[serde(default)]
 pub struct Config {
-    pub api_key: String,
+    pub api_key: Option<String>,
     pub model: String,
     pub max_tokens: i64,
     pub temperature: f64,
@@ -67,21 +72,19 @@ pub struct Config {
     pub top_p: f64,
     pub n: u64,
     pub stream: bool,
-    pub logprobs: u8,
-    pub echo: bool,
     pub stop: Vec<String>,
     pub presence_penalty: f64,
     pub frequency_penalty: f64,
-    pub best_of: u64,
     pub logit_bias: HashMap<String, f64>,
-    pub history_file: PathBuf,
     pub ui: UiConfig,
 }
 
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
-        if self.api_key.is_empty() {
-            return Err(String::from("API key is missing"));
+        if let Some(api_key) = &self.api_key {
+            if api_key.is_empty() {
+                return Err(String::from("API key is empty"));
+            }
         }
 
         if self.model.is_empty() {
@@ -110,10 +113,6 @@ impl Config {
             return Err(String::from("n must be between 1 and 10"));
         }
 
-        if self.logprobs > 2 {
-            return Err(String::from("logprobs must be 0, 1, or 2"));
-        }
-
         if self.stop.iter().any(|stop| stop.is_empty()) || self.stop.len() > 4 {
             return Err(String::from("Stop phrases cannot contain empties"));
         }
@@ -128,10 +127,6 @@ impl Config {
             ));
         }
 
-        if self.best_of < 1 || self.best_of > 5 {
-            return Err(String::from("best_of must be between 1 and 5"));
-        }
-
         for (key, value) in &self.logit_bias {
             if value < &-2.0 || value > &2.0 {
                 return Err(format!(
@@ -141,6 +136,45 @@ impl Config {
             }
         }
 
+        Ok(self.ui.validate()?)
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            model: "text-davinci-003".into(),
+            max_tokens: 16,
+            temperature: 0.5,
+            suffix: None,
+            top_p: 1.0,
+            n: 1,
+            stream: true,
+            stop: vec![],
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
+            logit_bias: HashMap::new(),
+            api_key: None,
+            ui: UiConfig::default(),
+        }
+    }
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            double_ctrlc: true,
+            hide_config: false,
+            redact_api_key: true,
+            multiline_insertions: false,
+            save_history: true,
+            history_file: PathBuf::from(get_config_dir::<2>().join("history")),
+        }
+    }
+}
+
+impl UiConfig {
+    pub fn validate(&self) -> Result<(), String> {
         let history_dir = match self.history_file.parent() {
             Some(dir) => dir,
             None => return Err(String::from("History file has no parent")),
@@ -159,39 +193,39 @@ impl Config {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            model: "text-davinci-003".into(),
-            history_file: PathBuf::from(get_config_dir::<2>().join("history")),
-            max_tokens: 16,
-            temperature: 0.5,
-            suffix: None,
-            top_p: 1.0,
-            n: 1,
-            stream: false,
-            logprobs: 0,
-            echo: false,
-            stop: vec![],
-            presence_penalty: 0.0,
-            frequency_penalty: 0.0,
-            best_of: 1,
-            logit_bias: HashMap::new(),
-            api_key: String::default(),
-            ui: UiConfig::default(),
+impl<'a> Into<OpenAIConfig> for &'a Config {
+    fn into(self) -> OpenAIConfig {
+        let mut ret = OpenAIConfig::new();
+        if let Some(api_key) = &self.api_key {
+            ret = ret.with_api_key(api_key.to_owned());
         }
+        ret
     }
 }
 
-impl Default for UiConfig {
-    fn default() -> Self {
-        Self {
-            double_ctrlc: true,
-            hide_config: false,
-            redact_api_key: true,
-            multiline_insertions: false,
-            save_history: true,
+impl<'a> Into<CreateChatCompletionRequestArgs> for &'a Config {
+    fn into(self) -> CreateChatCompletionRequestArgs {
+        if !self.stream {
+            warn!("Stream is disabled. This is not supported anymore and will be ignored.");
         }
+        CreateChatCompletionRequestArgs::default()
+            .n(self.n as u8)
+            .model(&self.model)
+            .max_tokens(self.max_tokens as u16)
+            .temperature(self.temperature as f32)
+            .frequency_penalty(self.frequency_penalty as f32)
+            .presence_penalty(self.presence_penalty as f32)
+            .logit_bias(
+                self.logit_bias
+                    .clone()
+                    .into_iter()
+                    .map(|(k, v)| (k, serde_json::Value::Number(Number::from_f64(v).unwrap())))
+                    .collect::<StdHashMap<String, Value>>(),
+            )
+            .top_p(self.top_p as f32)
+            .stop(self.stop.clone())
+            .stream(true)
+            .to_owned()
     }
 }
 
