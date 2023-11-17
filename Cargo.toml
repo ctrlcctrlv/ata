@@ -9,7 +9,6 @@ strip = false
 
 [profile.release]
 opt-level = "z"
-debug = true
 
 [profile.dev]
 opt-level = 0
