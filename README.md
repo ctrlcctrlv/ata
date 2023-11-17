@@ -28,7 +28,7 @@ TIP:<br>
 ## Usage
 
 Download the binary for your system from [Releases](https://github.com/ctrlcctrlv/ata2/releases).
-~~If you're running Arch Linux, then you can use the AUR packages: [ata](https://aur.archlinux.org/packages/ata), [ata-git](https://aur.archlinux.org/packages/ata-git), or [ata-bin](https://aur.archlinux.org/packages/ata-bin).~~ (Note: not yet done in fork.)
+If you're running Arch Linux, then you can use the AUR package: [ata2](https://aur.archlinux.org/packages/ata2)
 
 To specify the API key and some basic model settings, start the application.
 It should give an error and the option to create a configuration file called `ata2.toml` for you.
