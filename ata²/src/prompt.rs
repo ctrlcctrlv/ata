@@ -22,13 +22,15 @@ use ansi_colors::ColouredStr;
 use async_openai::{
     config::OpenAIConfig,
     types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
+        ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
         ChatCompletionResponseStreamMessage, CreateChatCompletionRequestArgs, FinishReason,
     },
     Client,
 };
 use atty;
+use std::future::IntoFuture;
 use log::debug;
+use tokio::sync::Mutex;
 use tokio_stream::StreamExt as _;
 
 use std::io::Write;
@@ -37,6 +39,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use crate::readline::string_to_chat_completion_request_user_message;
 use crate::TokioResult;
 use crate::ABORT;
 use crate::CONFIGURATION;
@@ -45,7 +48,7 @@ use crate::IS_RUNNING;
 lazy_static! {
     static ref STDOUT: Stdout = io::stdout();
     static ref STDERR: Stderr = io::stderr();
-    pub static ref CONVERSATION: Vec<ChatCompletionRequestMessage> = vec![];
+    pub static ref CONVERSATION: Mutex<Vec<ChatCompletionRequestMessage>> = Mutex::new(vec![]);
 }
 
 fn print_and_flush(text: &str) {
@@ -58,7 +61,7 @@ fn eprint_and_flush(text: &str) {
     (&*STDERR).flush().unwrap();
 }
 
-pub fn eprint_bold(msg: &str) {
+fn eprint_bold(msg: &str) {
     if atty::is(atty::Stream::Stderr) {
         let mut bold = ColouredStr::new(msg);
         bold.bold();
@@ -71,23 +74,22 @@ pub fn eprint_bold(msg: &str) {
 
 pub fn print_prompt() {
     if atty::is(atty::Stream::Stderr) {
-        eprint_bold("Prompt:\n");
+        eprint_bold("\nPrompt:\n");
     }
 }
 
 fn print_response_prompt() {
     if atty::is(atty::Stream::Stderr) {
-        eprint_bold("Response:\n");
+        eprint_bold("\nResponse:\n");
     }
 }
 
 fn finish_prompt() {
     IS_RUNNING.store(false, Ordering::SeqCst);
-    eprint_and_flush("\n\n");
     print_prompt();
 }
 
-pub fn print_error(msg: &str) {
+fn print_error(msg: &str) {
     error!("{msg}");
     finish_prompt()
 }
@@ -130,22 +132,32 @@ pub async fn request(
     let oconfig: OpenAIConfig = config.into();
     let openai = Client::with_config(oconfig);
     let completions = openai.chat();
-    let mut args: CreateChatCompletionRequestArgs = config.into();
-    args.messages(vec![ChatCompletionRequestUserMessageArgs::default()
-        .content(prompt)
-        .build()?
-        .into()]);
-    let mut stream = completions.create_stream(args.build()?).await?;
+    let messages = {
+        CONVERSATION
+            .lock()
+            .await
+            .push(string_to_chat_completion_request_user_message(
+                prompt.clone(),
+            ));
+        CONVERSATION.lock().await.clone().into_iter().collect::<Vec<_>>()
+    };
+    let mut request: CreateChatCompletionRequestArgs = config.into();
+    let mut stream = completions
+        .create_stream(
+            request
+                .messages(messages)
+                .build()?,
+        )
+        .await?;
     IS_RUNNING.store(true, Ordering::SeqCst);
 
     let got_first_success: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let mut ret = vec![];
 
     'abort: while !ABORT.load(Ordering::Relaxed) {
-        'outer: loop {
-            let c = stream.next().await;
+        while let Some(c) = stream.next().await {
             match c {
-                Some(Ok(completion)) => {
+                Ok(completion) => {
                     let completion = Arc::new(completion);
                     ret.push(completion.clone());
                     if !got_first_success.load(Ordering::SeqCst) {
@@ -162,12 +174,12 @@ pub async fn request(
                                 print_and_flush(&newline_fixed);
                             }
                             None => {
-                                continue 'outer;
                             }
                         }
                         match choice.finish_reason {
                             Some(FinishReason::Stop) => {
                                 debug!("Got stop from API, returning to REPL");
+                                IS_RUNNING.store(false, Ordering::SeqCst);
                                 break 'abort;
                             }
                             Some(reason) => {
@@ -176,24 +188,22 @@ pub async fn request(
                                 continue 'abort;
                             }
                             None => {
-                                continue;
                             }
                         }
                     }
                 }
-                Some(Err(e)) => {
+                Err(e) => {
                     let msg = format!("OpenAI API error: {e}");
                     print_error(&msg);
                     break 'abort;
                 }
-                None => {
-                    let msg = format!("OpenAI API error: no response");
-                    print_error(&msg);
-                    continue 'abort;
-                }
             }
         }
+        debug!("Got end of stream, returning to REPL");
+        IS_RUNNING.store(false, Ordering::SeqCst);
+        break 'abort;
     }
+    eprint_and_flush("\n");
 
     if !got_first_success.load(Ordering::SeqCst) {
         let msg = format!("Empty prompt, aborting.");
@@ -201,7 +211,6 @@ pub async fn request(
         return Ok(vec![]);
     }
 
-    print_and_flush("\n");
     let result = ret
         .drain(..)
         .map(|o| Arc::new(o.choices.clone().into_iter().collect::<Vec<_>>()))
@@ -215,6 +224,26 @@ pub async fn request(
         })
         .flatten()
         .collect::<Vec<_>>();
+
+    let complete_message = ret
+        .iter()
+        .map(|o| o.choices.clone().into_iter().collect::<Vec<_>>());
+
+    let mut assistant_msg = ChatCompletionRequestAssistantMessage::default();
+    assistant_msg.content = Some(
+        complete_message
+            .into_iter()
+            .flatten()
+            .map(|o| o.delta.content.unwrap())
+            .map(|o| post_process(&mut print_buffer, &o))
+            .collect::<Vec<_>>()
+            .join(""),
+    );
+    (*CONVERSATION)
+        .lock()
+        .into_future()
+        .await
+        .push(ChatCompletionRequestMessage::Assistant(assistant_msg));
 
     IS_RUNNING.store(false, Ordering::SeqCst);
     finish_prompt();

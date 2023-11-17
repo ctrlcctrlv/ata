@@ -20,6 +20,10 @@
 //!  See the License for the specific language governing permissions and
 //!  limitations under the License.
 
+use async_openai::types::{
+    ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, Role,
+};
 use futures_util::lock::Mutex;
 use rustyline::error::ReadlineError;
 use rustyline::{Cmd, Editor, KeyCode, KeyEvent, Modifiers};
@@ -29,14 +33,22 @@ use tokio::task::JoinHandle;
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::prompt;
 use crate::TokioResult;
 use crate::ABORT;
 use crate::CONFIGURATION as config;
 use crate::HAD_FIRST_INTERRUPT;
-use crate::IS_RUNNING;
+
+pub fn string_to_chat_completion_request_user_message(
+    string: String,
+) -> ChatCompletionRequestMessage {
+    ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+        role: Role::User,
+        content: Some(ChatCompletionRequestUserMessageContent::Text(string)),
+        ..Default::default()
+    })
+}
 
 pub struct Readline {
     pub rl: Arc<Mutex<Editor<()>>>,
@@ -52,7 +64,7 @@ impl Readline {
 }
 
 impl Readline {
-    pub fn handle(&mut self, tx: Sender<Option<String>>) -> JoinHandle<TokioResult<()>> {
+    pub async fn handle(&mut self, tx: Sender<Option<String>>) -> JoinHandle<TokioResult<()>> {
         let rl = self.rl.clone();
         let readline_handle: JoinHandle<TokioResult<()>> = tokio::spawn(async move {
             // If stdin is not a tty, we want to read once to the end of it and then exit.
@@ -78,9 +90,6 @@ impl Readline {
                 };
                 match readline {
                     Ok(line) => {
-                        if IS_RUNNING.load(Ordering::SeqCst) {
-                            ABORT.store(true, Ordering::SeqCst);
-                        }
                         if line.is_empty() {
                             continue;
                         }
@@ -89,25 +98,21 @@ impl Readline {
                         HAD_FIRST_INTERRUPT.store(false, Ordering::Relaxed);
                     }
                     Err(ReadlineError::Interrupted) => {
-                        if IS_RUNNING.load(Ordering::SeqCst) {
-                            ABORT.store(true, Ordering::SeqCst);
+                        if config.ui.double_ctrlc
+                            && !HAD_FIRST_INTERRUPT.load(Ordering::Relaxed)
+                        {
+                            HAD_FIRST_INTERRUPT.store(true, Ordering::Relaxed);
+                            eprint!("\nPress Ctrl-C again to exit.");
+                            prompt::print_prompt();
+                            continue;
                         } else {
-                            if config.ui.double_ctrlc
-                                && !HAD_FIRST_INTERRUPT.load(Ordering::Relaxed)
-                            {
-                                HAD_FIRST_INTERRUPT.store(true, Ordering::Relaxed);
-                                eprintln!("\nPress Ctrl-C again to exit.");
-                                tokio::time::sleep(Duration::from_millis(1000)).await;
-                                eprintln!();
-                                prompt::print_prompt();
-                                continue;
-                            } else {
-                                tx.send(None).await?;
-                                break;
-                            }
+                            tx.send(None).await?;
+                            ABORT.store(true, Ordering::Relaxed);
+                            break;
                         }
                     }
                     Err(ReadlineError::Eof) => {
+                        HAD_FIRST_INTERRUPT.store(false, Ordering::Relaxed);
                         tx.send(None).await?;
                         break;
                     }

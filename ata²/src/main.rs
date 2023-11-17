@@ -89,7 +89,6 @@ pub async fn main() -> TokioResult<()> {
                 futures_util::task::noop_waker_ref(),
             ));
             match msg {
-                Poll::Pending => {}
                 Poll::Ready(Some(Some(line))) => {
                     let result = prompt::request(line.to_string(), 0).await;
                     match result {
@@ -105,7 +104,7 @@ pub async fn main() -> TokioResult<()> {
                     info!("Got None in API request loop, exiting");
                     break;
                 }
-                Poll::Ready(None) => {
+                Poll::Ready(None) | Poll::Pending => {
                     // All the next 20 or so lines are just for debug logging…
                     {
                         let n = n_pending_debug_log_notices.fetch_add(1, Ordering::SeqCst);
@@ -147,7 +146,7 @@ pub async fn main() -> TokioResult<()> {
         }
     });
 
-    let readline_handle = rl.handle(tx);
+    let readline_handle = rl.handle(tx).await;
 
     tokio::select! {
         _ = readline_handle => {
