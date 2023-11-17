@@ -1,8 +1,12 @@
 [package]
 name = "ata"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
 authors = ["Fredrick R. Brennan <copypaste@kittens.ph>", "Rik Huijzer <t.h.huijzer@rug.nl>", "ATA Project Authors"]
+homepage = "https://github.com/ctrlcctrlv/ata2"
+repository = "https://github.com/ctrlcctrlv/ata2"
+readme = "README.md"
+description = "Ask the Terminal Anything² — ChatGPT¾ in your terminal"
 license = "Apache-2.0"
 
 [[bin]]
